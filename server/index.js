@@ -51,6 +51,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(ROOT_DIR, "src");
+const DIST_DIR = path.join(ROOT_DIR, "dist");
 const DATA_DIR = path.join(__dirname, "data");
 const DB_FILE = process.env.EDIO_DB_FILE || path.join(DATA_DIR, "db.json");
 const IMPORT_MEDIA_DIR = path.join(DATA_DIR, "imported-media");
@@ -764,6 +765,10 @@ async function route(req, res) {
   if (parts[0] === "api" && parts[1] === "admin") {
     const admin = requireAdmin(req);
     return handleAdminRoute(req, res, url, pathname, parts, admin);
+  }
+
+  if ((method === "GET" || method === "HEAD") && existsSync(DIST_DIR)) {
+    return sendDistAsset(req, res, pathname);
   }
 
   throw new ApiError(404, "not_found", "Endpoint not found");
@@ -4821,9 +4826,53 @@ async function sendStaticAsset(res, pathname) {
   }
 }
 
+async function sendDistAsset(req, res, pathname) {
+  const cleanPathname = pathname === "/" ? "/index.html" : pathname;
+  const requestedPath = path.normalize(path.join(DIST_DIR, cleanPathname.replace(/^\/+/, "")));
+  const distRoot = path.normalize(DIST_DIR);
+
+  if (!requestedPath.startsWith(distRoot)) {
+    throw new ApiError(403, "forbidden", "Static asset path is not allowed");
+  }
+
+  let filePath = requestedPath;
+  try {
+    const fileStats = await stat(filePath);
+    if (!fileStats.isFile()) throw new Error("not_file");
+  } catch {
+    filePath = path.join(DIST_DIR, "index.html");
+  }
+
+  const contents = await readFile(filePath);
+  const isHtml = path.basename(filePath) === "index.html";
+  res.writeHead(200, {
+    "Content-Type": getMimeType(filePath),
+    "Content-Length": contents.length,
+    "Cache-Control": isHtml ? "no-cache" : "public, max-age=31536000, immutable",
+  });
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  res.end(contents);
+}
+
 function getMimeType(filePath) {
   const extension = path.extname(filePath).toLowerCase();
   switch (extension) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".json":
+    case ".webmanifest":
+      return "application/json; charset=utf-8";
+    case ".ico":
+      return "image/x-icon";
+    case ".txt":
+      return "text/plain; charset=utf-8";
     case ".jpg":
     case ".jpeg":
       return "image/jpeg";

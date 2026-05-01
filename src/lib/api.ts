@@ -1,6 +1,6 @@
 export const API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ||
-  "http://127.0.0.1:8787";
+  (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8787");
 
 export class ApiError extends Error {
   status: number;
