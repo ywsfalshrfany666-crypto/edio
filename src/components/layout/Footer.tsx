@@ -78,7 +78,7 @@ export function Footer() {
           to: "https://t.me/edio_iq",
           external: true,
         },
-        { label: lang === "ar" ? "اتصل بنا" : "Call us", to: "tel:+9647702046674", external: true },
+        { label: lang === "ar" ? "واتساب" : "WhatsApp", to: "https://wa.me/9647702046674", external: true },
         { label: t("footer.links.trackOrder"), to: "/account/orders" },
         { label: t("footer.links.faq"), to: "/about#faq" },
       ],
