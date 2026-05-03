@@ -88,7 +88,7 @@ export function PreOwnedBlock() {
           </div>
 
           <Link
-            to="/shop?filter=preowned"
+            to="/pre-owned"
             className="premium-cta group inline-flex items-center gap-3 px-5 py-2.5 text-[11px] font-mono uppercase tracking-[0.22em]"
           >
             <span>{t("preowned.browse")}</span>

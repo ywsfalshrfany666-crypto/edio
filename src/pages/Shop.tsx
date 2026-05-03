@@ -31,7 +31,11 @@ const Shop = () => {
   const initialCat = params.get("cat") as CategorySlug | null;
   const initialBrand = params.get("brand");
   const productsRef = useRef<HTMLDivElement>(null);
+  const { products, categories: runtimeCategories, brands: runtimeBrands } = useRuntimeCatalog();
+  const categories = runtimeCategories.length ? runtimeCategories : staticCategories;
+  const brandList = runtimeBrands.length ? runtimeBrands : staticBrandList;
 
+  const initialFilter = params.get("filter");
   const [activeCats, setActiveCats] = useState<CategorySlug[]>(initialCat ? [initialCat] : []);
   const [activeBrands, setActiveBrands] = useState<string[]>(initialBrand ? [initialBrand] : []);
   const [maxCatalogPrice] = useState(() =>
@@ -41,9 +45,6 @@ const Shop = () => {
   const [sort, setSort] = useState<SortKey>("featured");
   const [query, setQuery] = useState("");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-  const { products, categories: runtimeCategories, brands: runtimeBrands } = useRuntimeCatalog();
-  const categories = runtimeCategories.length ? runtimeCategories : staticCategories;
-  const brandList = runtimeBrands.length ? runtimeBrands : staticBrandList;
 
   // Sync brand from URL when changed externally
   useEffect(() => {
@@ -63,13 +64,14 @@ const Shop = () => {
         (q === "" ||
           p.name.en.toLowerCase().includes(q) ||
           p.name.ar.toLowerCase().includes(q) ||
-          p.brand.toLowerCase().includes(q)),
+          p.brand.toLowerCase().includes(q)) &&
+        (initialFilter !== "preowned" || p.badge === "preowned"),
     );
     if (sort === "priceAsc") list = [...list].sort((a, b) => a.price - b.price);
     if (sort === "priceDesc") list = [...list].sort((a, b) => b.price - a.price);
     if (sort === "newest") list = [...list].sort((a, b) => (b.badge === "new" ? 1 : 0) - (a.badge === "new" ? 1 : 0));
     return list;
-  }, [activeCats, activeBrands, priceMax, sort, query]);
+  }, [activeCats, activeBrands, priceMax, sort, query, initialFilter]);
 
   // Compute counts per brand / category from full catalog
   const brandCounts = useMemo(() => {

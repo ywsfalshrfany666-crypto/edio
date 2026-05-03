@@ -171,7 +171,7 @@ function buildTertiaryItems(lang: "en" | "ar", preOwnedLabel: string): TertiaryI
   }
 
   items.push({
-    href: "/shop?filter=preowned",
+    href: "/pre-owned",
     label: { en: "Pre-Owned", ar: preOwnedLabel },
   });
 

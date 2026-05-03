@@ -73,5 +73,5 @@ export const buildNav = (t: TFunction): NavItem[] => [
       { label: t("navMenus.accessories.cases"), to: "/category/accessories/cases" },
     ],
   },
-  { label: t("nav.preowned"), to: "/shop?filter=preowned" },
+  { label: t("nav.preowned"), to: "/pre-owned" },
 ];

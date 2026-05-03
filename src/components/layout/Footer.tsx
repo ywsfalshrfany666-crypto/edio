@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
-import { ArrowRight, ChevronDown, Instagram, MapPin, MessageCircle, Phone } from "lucide-react";
+import { ArrowRight, ChevronDown, ExternalLink, Instagram, MapPin, MessageCircle, Phone, Send } from "lucide-react";
 import { Logo } from "./Header";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,8 @@ const copy = {
     navLabel: "Footer navigation",
     locationPrefix: "Showroom",
     instagram: "Instagram",
+    facebook: "Facebook",
+    telegram: "Telegram",
     needHelp: "Need help choosing gear?",
     adviceTitle: "Talk to Edio",
     adviceBody: "Tell us what you listen to and we’ll recommend the right setup.",
@@ -36,6 +38,8 @@ const copy = {
     navLabel: "تنقل الفوتر",
     locationPrefix: "المعرض",
     instagram: "إنستغرام",
+    facebook: "فيسبوك",
+    telegram: "تيليغرام",
     needHelp: "تحتاج مساعدة في اختيار جهازك؟",
     adviceTitle: "تحدث مع Edio",
     adviceBody: "أخبرنا بما تستمع إليه وسنقترح لك التجهيز الأنسب.",
@@ -63,13 +67,18 @@ export function Footer() {
       links: [
         { label: t("footer.links.shopAll"), to: "/shop" },
         { label: t("footer.links.newArrivals"), to: "/shop?sort=newest" },
-        { label: t("footer.links.preowned"), to: "/shop?filter=preowned" },
+        { label: t("footer.links.preowned"), to: "/pre-owned" },
       ],
     },
     {
       title: t("footer.sections.support"),
       links: [
-        { label: t("footer.links.contact"), to: "https://t.me/edio_iq", external: true },
+        {
+          label: lang === "ar" ? "تواصل عبر تيليغرام" : "Telegram support",
+          to: "https://t.me/edio_iq",
+          external: true,
+        },
+        { label: lang === "ar" ? "اتصل بنا" : "Call us", to: "tel:+9647702046674", external: true },
         { label: t("footer.links.trackOrder"), to: "/account/orders" },
         { label: t("footer.links.faq"), to: "/about#faq" },
       ],
@@ -118,9 +127,21 @@ export function Footer() {
                 </a>
               </li>
               <li>
-                <a href="https://instagram.com/edio.iq" target="_blank" rel="noopener noreferrer">
+                <a href="https://www.instagram.com/edio.iq/" target="_blank" rel="noopener noreferrer">
                   <Instagram className="h-4 w-4" aria-hidden="true" />
                   <span>{text.instagram}</span>
+                </a>
+              </li>
+              <li>
+                <a href="https://www.facebook.com/edio.iq/" target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                  <span>{text.facebook}</span>
+                </a>
+              </li>
+              <li>
+                <a href="https://t.me/edio_iq" target="_blank" rel="noopener noreferrer">
+                  <Send className="h-4 w-4" aria-hidden="true" />
+                  <span>{text.telegram}</span>
                 </a>
               </li>
             </ul>
@@ -204,8 +225,14 @@ function FooterInlineLink({ link, isCurrent }: { link: FooterLink; isCurrent: bo
   const className = cn("edio-footer__link", isCurrent && "is-current");
 
   if (link.external) {
+    const opensNewTab = /^https?:\/\//i.test(link.to);
     return (
-      <a href={link.to} target="_blank" rel="noopener noreferrer" className={className}>
+      <a
+        href={link.to}
+        target={opensNewTab ? "_blank" : undefined}
+        rel={opensNewTab ? "noopener noreferrer" : undefined}
+        className={className}
+      >
         {link.label}
       </a>
     );

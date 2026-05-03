@@ -76,6 +76,8 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/shop" element={<Shop />} />
+            <Route path="/pre-owned" element={<Navigate to="/shop?filter=preowned" replace />} />
+            <Route path="/preowned" element={<Navigate to="/shop?filter=preowned" replace />} />
             <Route path="/category/:slug" element={<Category />} />
             <Route path="/category/:slug/:term" element={<Category />} />
             <Route path="/product" element={<Navigate to="/shop" replace />} />
