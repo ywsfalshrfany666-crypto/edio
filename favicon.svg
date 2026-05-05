@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="56" fill="#ff4f0a"/>
+  <defs>
+    <mask id="edio-c">
+      <rect width="512" height="512" fill="#000"/>
+      <circle cx="256" cy="256" r="196" fill="#fff"/>
+      <circle cx="256" cy="256" r="128" fill="#000"/>
+      <rect x="326" y="227" width="150" height="58" rx="29" fill="#000"/>
+      <rect x="330" y="285" width="150" height="58" fill="#000"/>
+    </mask>
+  </defs>
+  <rect width="512" height="512" fill="#fff" mask="url(#edio-c)"/>
+  <g fill="#fff">
+    <circle cx="256" cy="156" r="6.5"/>
+    <circle cx="204" cy="181" r="6.5"/>
+    <circle cx="256" cy="181" r="6.5"/>
+    <circle cx="204" cy="207" r="8"/>
+    <circle cx="230" cy="207" r="8"/>
+    <circle cx="256" cy="207" r="8"/>
+    <circle cx="282" cy="207" r="8"/>
+    <circle cx="178" cy="231" r="8"/>
+    <circle cx="204" cy="231" r="8"/>
+    <circle cx="230" cy="231" r="8"/>
+    <circle cx="256" cy="231" r="8"/>
+    <circle cx="282" cy="231" r="8"/>
+    <circle cx="308" cy="231" r="8"/>
+    <circle cx="152" cy="255" r="8"/>
+    <circle cx="178" cy="255" r="8"/>
+    <circle cx="204" cy="255" r="8"/>
+    <circle cx="230" cy="255" r="8"/>
+    <circle cx="256" cy="255" r="8"/>
+    <circle cx="282" cy="255" r="8"/>
+    <circle cx="308" cy="255" r="8"/>
+    <circle cx="178" cy="279" r="8"/>
+    <circle cx="204" cy="279" r="8"/>
+    <circle cx="230" cy="279" r="8"/>
+    <circle cx="256" cy="279" r="8"/>
+    <circle cx="282" cy="279" r="8"/>
+    <circle cx="308" cy="279" r="8"/>
+    <circle cx="204" cy="305" r="7"/>
+    <circle cx="256" cy="305" r="8"/>
+    <circle cx="282" cy="305" r="7"/>
+    <circle cx="204" cy="329" r="6.5"/>
+    <circle cx="256" cy="329" r="8"/>
+    <circle cx="256" cy="354" r="6.5"/>
+  </g>
+</svg>

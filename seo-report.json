@@ -1,0 +1,130 @@
+{
+  "generatedAt": "2026-05-05T11:41:38.799Z",
+  "routes": 164,
+  "products": 133,
+  "categories": 7,
+  "duplicateSlugs": [],
+  "productsWithSeoIssues": 131,
+  "issueSamples": [
+    {
+      "slug": "philips-shp9500-32223",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "kiwi-ears-canta-31336",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "simgot-gew1-31301",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "tripowin-zonie-2-meter-cable-31288",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "tripowin-zonie-31287",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "spinfit-neo-31266",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "tangzu-harmonic-empire-xiaoqiao-31121",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "aful-performer-5-2-31080",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "ziigaat-lush-31031",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "ziigaat-cinno-31030",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "trn-t2-pro-30982",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "tangzu-x-hbb-wu-heyday-edition-30969",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "s-m-s-l-ds200-30938",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "simgot-ep5-30890",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "simgot-dew4x-30874",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "roseselsa-distant-mountain-30871",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "moondrop-echo-b-30794",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "letshuoer-dx1-30793",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "kiwi-ears-ke4-30791",
+      "issues": [
+        "missing specs"
+      ]
+    },
+    {
+      "slug": "kiwi-ears-airoso-30721",
+      "issues": [
+        "missing specs"
+      ]
+    }
+  ]
+}
