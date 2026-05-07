@@ -30,8 +30,8 @@ jobs:
     - name: 📂 Sync files to Hostinger
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
-        server: ${{ secrets.FTP_SERVER || secrets.FTP_HOST || secrets.HOSTINGER_FTP_SERVER || secrets.HOSTINGER_FTP_HOST }}
-        username: ${{ secrets.FTP_USERNAME || secrets.FTP_USER || secrets.HOSTINGER_FTP_USERNAME || secrets.HOSTINGER_FTP_USER }}
+        server: ${{ secrets.FTP_SERVER || secrets.FTP_HOST || secrets.HOSTINGER_FTP_SERVER || secrets.HOSTINGER_FTP_HOST || vars.FTP_SERVER || vars.FTP_HOST || vars.HOSTINGER_FTP_SERVER || vars.HOSTINGER_FTP_HOST }}
+        username: ${{ secrets.FTP_USERNAME || secrets.FTP_USER || secrets.HOSTINGER_FTP_USERNAME || secrets.HOSTINGER_FTP_USER || vars.FTP_USERNAME || vars.FTP_USER || vars.HOSTINGER_FTP_USERNAME || vars.HOSTINGER_FTP_USER }}
         password: ${{ secrets.FTP_PASSWORD || secrets.HOSTINGER_FTP_PASSWORD }}
         local-dir: ./dist/
         server-dir: ./public_html/
