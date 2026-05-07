@@ -773,12 +773,79 @@ import img_simgot_supermix_4_31265_2 from "@/assets/products/simgot-supermix-4-3
 import img_simgot_supermix_4_31265_3 from "@/assets/products/simgot-supermix-4-31265-3.jpg";
 import img_simgot_supermix_4_31265_4 from "@/assets/products/simgot-supermix-4-31265-4.jpg";
 import { csvProductAdditions } from "./catalogCsvAdditions";
+import type { ProductPageContent } from "@/lib/productContent/productContentTypes";
 
 export type CategorySlug =
   | "headphones" | "iems" | "dap" | "dac" | "mic"
   | "audio-interface" | "accessories" | "unknown";
 
 export type Spec = { label: string; value: string };
+
+export type ProductDescriptionBlockType = "text" | "image" | "spec_image" | "image_group" | "callout";
+
+export type ProductDescriptionImageRole =
+  | "description"
+  | "feature"
+  | "spec_image"
+  | "box_image"
+  | "unknown_description_image"
+  | "comparison"
+  | "diagram"
+  | "unknown";
+
+export type ProductDescriptionBlock = {
+  id?: string;
+  type: ProductDescriptionBlockType;
+  section?: "description" | "description_media" | "technical_specs" | "box_contents";
+  content?: {
+    text?: string;
+    markdown?: string;
+    html_or_markdown?: string;
+    imageRole?: ProductDescriptionImageRole;
+  };
+  media?: {
+    url: string;
+    alt?: string;
+    width?: number;
+    height?: number;
+    role?: ProductDescriptionImageRole;
+  };
+  mediaId?: string;
+  media_id?: string;
+  sortOrder?: number;
+  sort_order?: number;
+  altText?: string;
+  alt_text?: string;
+  caption?: string;
+  sourceUrl?: string;
+  source_url?: string;
+  sourceType?: "official" | "retailer" | "imported" | "manual" | "unknown";
+  source_type?: "official" | "retailer" | "imported" | "manual" | "unknown";
+  extractedText?: string;
+  extracted_text?: string;
+  extractionConfidence?: number;
+  extraction_confidence?: number;
+  needsReview?: boolean;
+  needs_review?: boolean;
+};
+
+export type ProductRelationshipType =
+  | "accessory"
+  | "compatible"
+  | "similar"
+  | "alternative"
+  | "same_brand"
+  | "blocked";
+
+export type ProductRelationship = {
+  targetProductId: string;
+  relationshipType: ProductRelationshipType;
+  reason?: string;
+  priority?: number;
+  confidence?: number;
+  active?: boolean;
+  source?: "manual" | "imported" | "automatic";
+};
 
 export type Product = {
   id: string;
@@ -793,6 +860,10 @@ export type Product = {
   currency: "IQD";
   image: string;
   gallery: string[];
+  productPage?: ProductPageContent;
+  descriptionBlocks?: ProductDescriptionBlock[];
+  relationships?: ProductRelationship[];
+  productRelationships?: ProductRelationship[];
   badge: "new" | "featured" | "best" | "preowned" | null;
   features: string[];
   specs: Spec[];

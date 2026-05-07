@@ -69,7 +69,7 @@ const AdminOrderDetail = () => {
   const meta = orderStatusMeta[status];
 
   return (
-    <AdminLayout title={order?.number || "Order"} eyebrow="Orders / Detail">
+    <AdminLayout title={order?.number || "Order"} eyebrow="Orders / Detail" seoTitle="Order details">
       <div className="space-y-6">
         <Link
           to="/admin/orders"

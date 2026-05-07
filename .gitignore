@@ -10,10 +10,13 @@ lerna-debug.log*
 
 node_modules
 .tools/
+.codex-tools/
+lighthouse-reports/
 dist
 dist-ssr
 *.local
 server/data/db.json
+supabase/.temp/
 
 # Editor directories and files
 .vscode/*

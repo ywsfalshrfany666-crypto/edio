@@ -20,7 +20,7 @@ const en = {
   },
   navMenus: {
     headphones: {
-      typeBack: { title: "Back Type", closed: "Closed Back", open: "Open Back" },
+      typeBack: { title: "Back Design", closed: "Closed Back", open: "Open Back" },
       driver: { title: "Driver Configuration", dynamic: "Dynamic Driver", planar: "Planar Driver" },
     },
     iems: {
@@ -99,10 +99,10 @@ const en = {
     eyebrow: "The Pinnacle of Sound",
     title: "Hear the Silence.\nFeel the Impact.",
     subtitle:
-      "edio curates reference-grade audio essentials for people who care how sound feels — engineered for precision, presented with restraint.",
-    primaryCta: "Discover Latest Releases",
+      "Curated headphones, IEMs, DACs, and studio essentials for serious listening.",
+    primaryCta: "Shop Audio Gear",
     secondaryCta: "Browse the Collection",
-    aboutCta: "About EDIO",
+    aboutCta: "About edio",
     stats: { brands: "Brands", rating: "Rated", support: "Support" },
     sideLabel: "Feel the Impact.",
     sideBody:
@@ -131,7 +131,7 @@ const en = {
     eyebrow: "Flagship Release",
     title: "Pure Transient Response.",
     description:
-      "Experience uncolored audio reproduction with our curated selection of reference-grade planar magnetic and dynamic driver systems.",
+      "A focused pick for clean detail, control, and serious listening.",
   },
   bestsellers: { eyebrow: "Most Wanted", title: "Best Sellers", description: "What our community is listening to right now." },
   newArrivals: { eyebrow: "Just Landed", title: "New Arrivals", viewAll: "View All" },
@@ -139,16 +139,16 @@ const en = {
     eyebrow: "Editorial",
     title: "The Architecture of Listening.",
     body:
-      "We believe audio gear is industrial art. Every product in EDIO has been auditioned, measured, and chosen for one reason: it performs. Discover a more refined way to shop sound.",
+      "Auditioned gear, clear choices, and a calmer way to shop sound.",
     philosophy: "Our Philosophy",
-    location: "Curated · Mosul · Iraq",
+    location: "Curated · Iraq",
     caption: "Studio · Vol. 01",
   },
   preowned: {
     eyebrow: "Certified Pre-Owned",
     title: "Vintage & Inspected Gear.",
     body:
-      "High-end audio is an investment. Our inspected pre-owned selection ensures sonic integrity without the initial depreciation.",
+      "Inspected high-end gear with clear condition notes and buyer protection.",
     browse: "Browse Used Equipment",
     grade: "A-Grade",
     pillars: [
@@ -169,7 +169,7 @@ const en = {
         desc: "Extending the life of high-end gear, fewer e-waste cycles.",
       },
     ],
-    footerAuthentic: "Authenticated By EDIO",
+    footerAuthentic: "Authenticated By edio",
     footerRotation: "Limited Stock · Rotates Weekly",
   },
   trust: {
@@ -188,12 +188,12 @@ const en = {
     submit: "Subscribe",
   },
   footer: {
-    tagline: "Engineered for precision. Presented with restraint.",
+    tagline: "Engineered for precision.",
     channelLabel: "Telegram Channel",
     channelCta: "Join @edio_iq",
     channelMeta: "t.me/edio_iq · drops · deals · early access",
-    location: "Iraq, Mosul",
-    signature: "EDIO · The Sonic Gallery",
+    location: "Iraq",
+    signature: "edio · The Sonic Gallery",
     sections: {
       shop: "Shop",
       brand: "Brand",
@@ -207,7 +207,7 @@ const en = {
       newArrivals: "New Arrivals",
       preowned: "Pre-Owned",
       giftCards: "Gift Cards",
-      about: "About EDIO",
+      about: "About edio",
       journal: "Journal",
       contact: "Contact",
       warranty: "Warranty",
@@ -226,7 +226,7 @@ const en = {
       cart: "Shopping Cart",
       checkout: "Checkout",
     },
-    copyright: "© 2026 EDIO Audio. Engineered for precision.",
+    copyright: "© 2026 edio Audio. Engineered for precision.",
   },
   accountMenu: {
     overview: "Overview",
@@ -262,7 +262,7 @@ const en = {
     features: "Features",
     inTheBox: "In the Box",
     related: "You May Also Like",
-    warranty: "2-Year EDIO Warranty",
+    warranty: "2-Year edio Warranty",
     freeShipping: "Free shipping over $200",
     returns: "30-day returns",
     color: "Finish",
@@ -296,10 +296,10 @@ const en = {
     success: "Order placed — a confirmation has been sent.",
   },
   about: {
-    eyebrow: "About EDIO",
+    eyebrow: "About edio",
     title: "Curated audio,\nfor people who listen.",
     body:
-      "EDIO is a boutique audio destination — a quiet showroom for reference-grade headphones, amplifiers, and the small details that elevate everyday listening. We choose the products. You choose the music.",
+      "edio is a boutique audio destination — a quiet showroom for reference-grade headphones, amplifiers, and the small details that elevate everyday listening. We choose the products. You choose the music.",
     values: [
       { title: "Taste over assortment", body: "We won't carry it if we wouldn't recommend it." },
       { title: "Measured and matched", body: "Every product is auditioned and benchmarked before listing." },
@@ -327,7 +327,7 @@ const ar: typeof en = {
   },
   navMenus: {
     headphones: {
-      typeBack: { title: "نوع العزل", closed: "مغلق", open: "مفتوح" },
+      typeBack: { title: "ظهر السماعة", closed: "مغلق", open: "مفتوح" },
       driver: { title: "نوع الدرايفر", dynamic: "درايفر داينمك", planar: "درايفر بلانر" },
     },
     iems: {
@@ -406,8 +406,8 @@ const ar: typeof en = {
     eyebrow: "قمة الصوت",
     title: "اسمع الصمت.\nاشعر بالأثر.",
     subtitle:
-      "إديو تنتقي أساسيات صوت مرجعية لمن يهتم بإحساس الصوت نفسه، بدقة هندسية وعرض أنيق هادئ.",
-    primaryCta: "اكتشف أحدث الإصدارات",
+      "سماعات، IEM، DAC، وأدوات استوديو مختارة للاستماع الجاد.",
+    primaryCta: "تسوّق معدات الصوت",
     secondaryCta: "تصفّح المجموعة",
     aboutCta: "عن إديو",
     stats: { brands: "علامة", rating: "تقييم", support: "دعم" },
@@ -438,7 +438,7 @@ const ar: typeof en = {
     eyebrow: "إصدار رائد",
     title: "استجابة انتقالية نقية.",
     description:
-      "اختبر إعادة إنتاج صوت غير ملوّن مع مجموعتنا المنتقاة من أنظمة السماعات المرجعية البلانر والداينمك.",
+      "اختيار مركز لتفاصيل نظيفة وتحكم واستماع جاد.",
   },
   bestsellers: { eyebrow: "الأكثر طلبًا", title: "الأكثر مبيعًا", description: "ما يستمع إليه مجتمعنا الآن." },
   newArrivals: { eyebrow: "وصل حديثًا", title: "الإضافات الجديدة", viewAll: "عرض الكل" },
@@ -446,16 +446,16 @@ const ar: typeof en = {
     eyebrow: "افتتاحية",
     title: "هندسة الاستماع.",
     body:
-      "نؤمن أن معدات الصوت فن صناعي. كل منتج في إديو جرى الاستماع إليه وقياسه واختياره لسبب واحد: لأنه يقدّم أداءً حقيقيًا. اكتشف طريقة أرقى للتسوّق الصوتي.",
+      "معدات مجرّبة، اختيارات أوضح، وطريقة أهدأ لتسوّق الصوت.",
     philosophy: "فلسفتنا",
-    location: "مختار بعناية · الموصل · العراق",
+    location: "مختار بعناية · العراق",
     caption: "الاستوديو · الإصدار 01",
   },
   preowned: {
     eyebrow: "مستعمل معتمد",
     title: "معدات أصيلة ومفحوصة.",
     body:
-      "الصوت الراقي استثمار، ومجموعتنا المستعملة المفحوصة تحافظ على النزاهة الصوتية بدون خسارة الاستهلاك الأولى.",
+      "معدات راقية مفحوصة مع حالة واضحة وحماية للمشتري.",
     browse: "تصفّح المستعمل",
     grade: "درجة A",
     pillars: [
@@ -495,12 +495,12 @@ const ar: typeof en = {
     submit: "اشترك",
   },
   footer: {
-    tagline: "مصنوع بدقة. ومقدّم باتزان.",
+    tagline: "مصنوع بدقة.",
     channelLabel: "قناة تيليجرام",
     channelCta: "انضم إلى @edio_iq",
     channelMeta: "t.me/edio_iq · عروض · تنبيهات · وصول مبكر",
-    location: "العراق، الموصل",
-    signature: "EDIO · معرض الصوت",
+    location: "العراق",
+    signature: "edio · معرض الصوت",
     sections: {
       shop: "المتجر",
       brand: "إديو",
@@ -533,7 +533,7 @@ const ar: typeof en = {
       cart: "سلة التسوق",
       checkout: "إتمام الدفع",
     },
-    copyright: "© 2026 EDIO Audio. مصنوع بدقة.",
+    copyright: "© 2026 edio Audio. مصنوع بدقة.",
   },
   accountMenu: {
     overview: "نظرة عامة",
@@ -587,7 +587,7 @@ const ar: typeof en = {
     express: "دفع سريع",
     or: "أو ادفع بالبطاقة",
     contact: "بيانات التواصل",
-    shipping: "عنوان الشحن",
+    shipping: "عنوانك",
     payment: "الدفع",
     email: "البريد الإلكتروني",
     firstName: "الاسم الأول",

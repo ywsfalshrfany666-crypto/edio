@@ -18,7 +18,7 @@ const Account = () => {
   ];
 
   return (
-    <AccountLayout title={`Hi, ${user.fullName.split(" ")[0]}`} eyebrow="Overview">
+    <AccountLayout title={`Hi, ${user.fullName.split(" ")[0]}`} eyebrow="Overview" seoTitle="Account">
       <div className="space-y-10">
         {/* Quick cards */}
         <div className="grid gap-3 sm:grid-cols-3">
@@ -94,7 +94,7 @@ const Account = () => {
           <div>
             <p className="font-display text-sm font-semibold">Your data is yours</p>
             <p className="text-[12px] text-muted-foreground mt-1">
-              EDIO never shares your contact info. Sign out from any device under{" "}
+              edio never shares your contact info. Sign out from any device under{" "}
               <span className="text-foreground">Profile</span>.
             </p>
           </div>

@@ -65,6 +65,21 @@ describe("product import pipeline", () => {
     expect(validateImportModelStepOutput(output)).toEqual({ valid: true, errors: [] });
   });
 
+  it("adds description/spec media candidates separately from gallery candidates", () => {
+    const output = buildImportModelStepOutput(
+      {
+        ...draft,
+        descriptionHtml: '<section><h2>Technical specifications</h2><img src="https://rode.com/podmic-spec-table.jpg" alt="PodMic spec table" /></section>',
+      },
+      [],
+      { confidence: 0.91 },
+    );
+
+    expect(output.image_candidates.some((item) => item.role === "main")).toBe(true);
+    expect(output.image_candidates.some((item) => item.role === "spec_image")).toBe(true);
+    expect(output.image_candidates.find((item) => item.role === "spec_image")?.classification_reason).toContain("spec_image_hint");
+  });
+
   it("creates review tasks for low-confidence import classifications", () => {
     const job = buildImportJobRecord({ mode: "query", input: "unknown audio thing", now: "2026-04-25T00:00:00.000Z" });
     const task = buildImportReviewTask({

@@ -37,6 +37,18 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/store/auth";
 import { useCurrency } from "@/store/currency";
 import { invalidateRuntimeCatalog } from "@/lib/runtimeCatalog";
+import type { ProductDescriptionBlock, ProductRelationship } from "@/data/catalog";
+import { calculateProductQuality, getQualityTone } from "@/lib/productQuality";
+import type { AiResearchDraft } from "@/lib/aiProductImporter";
+import { createResearchDraftFromImported, validateResearchDraft } from "@/lib/aiProductImporter";
+import type { ProductPageContent } from "@/lib/productContent/productContentTypes";
+import {
+  buildProductPageDraft,
+  normalizeProductPageContent,
+  parseProductPageJson,
+  stringifyProductPage,
+  validateProductPageContent,
+} from "@/lib/productPageBuilder";
 import {
   getDisplayCategoryTerms,
   getPrimaryProductTerm,
@@ -71,9 +83,16 @@ type ProductFormState = {
   sales: string;
   image: string;
   galleryText: string;
+  productPageText: string;
+  descriptionBlocksText: string;
+  relationshipsText: string;
   featuresText: string;
   specs: ProductSpecForm[];
 };
+
+type ProductPageBuilderTab = "basic" | "media" | "description" | "sound" | "specs" | "seo" | "sources" | "preview" | "ai_import";
+type ProductPagePreviewTab = "description" | "sound" | "specs";
+type ProductPagePreviewDevice = "desktop" | "mobile";
 
 type CatalogClassification = {
   raw_input: string;
@@ -313,8 +332,12 @@ type ImportedDraft = {
   officialPriceUsd?: number | null;
   image: string;
   gallery: string[];
+  productPage?: ProductPageContent;
+  descriptionBlocks?: ProductDescriptionBlock[];
   features: string[];
   specs: Array<{ label: { en: string; ar: string }; value: string }>;
+  relationships?: ProductRelationship[];
+  productRelationships?: ProductRelationship[];
   importMeta?: ImportMeta;
   strictProductData?: StrictProductData;
   catalogClassification?: CatalogClassification;
@@ -348,6 +371,59 @@ type ImportResponse = {
   draft: ImportedDraft;
   candidates?: ImportCandidate[];
   existingProduct?: ExistingImportMatch | null;
+};
+
+type EnrichmentPreviewItem = {
+  product_id: string;
+  product_title: string;
+  matched_source: string | null;
+  source_url: string;
+  source_type: string;
+  match_confidence: number;
+  match_type: string;
+  proposed_blocks_count: number;
+  proposed_description_images_count: number;
+  proposed_spec_images_count: number;
+  proposed_box_contents_count: number;
+  proposed_box_images_count?: number;
+  warnings: string[];
+  recommended_action: "apply_safe" | "needs_review" | "skip";
+};
+
+type EnrichmentReport = {
+  summary: {
+    total_products_checked: number;
+    products_with_sources_found: number;
+    products_safe_to_enrich: number;
+    products_needing_review: number;
+    description_images_found: number;
+    spec_images_found: number;
+    box_images_found: number;
+    technical_specs_found: number;
+    box_contents_found: number;
+    products_skipped: number;
+    warnings: string[];
+  };
+  items: EnrichmentPreviewItem[];
+  preview: EnrichmentPreviewItem[];
+  applyPlan: {
+    safeToApply: boolean;
+    confidenceThreshold: number;
+    supportedModes: string[];
+    blockedReasons: string[];
+  };
+};
+
+type EnrichmentApplyResult = {
+  applied_products: number;
+  skipped_products: number;
+  description_text_blocks_added: number;
+  description_images_added: number;
+  spec_images_added: number;
+  box_images_added: number;
+  box_contents_added: number;
+  duplicate_images_skipped: number;
+  warnings: string[];
 };
 
 const badgeOptions = [
@@ -584,6 +660,277 @@ function parseGalleryItems(value: string) {
   return items;
 }
 
+function serializeDescriptionBlocks(blocks: ProductDescriptionBlock[] = []) {
+  const normalized = (blocks || [])
+    .map((block, index) => normalizeDescriptionBlockDraft(block, index))
+    .filter((block): block is ProductDescriptionBlock => Boolean(block));
+  return normalized.length ? JSON.stringify(normalized, null, 2) : "";
+}
+
+function parseDescriptionBlocks(value: string): ProductDescriptionBlock[] {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const seen = new Set<string>();
+        return parsed
+          .map((block, index) => normalizeDescriptionBlockDraft(block, index))
+          .filter((block): block is ProductDescriptionBlock => {
+            if (!block) return false;
+            const dedupeKey = block.media?.url ? normalizeMediaKey(block.media.url) : `${block.type}:${block.content?.text || block.content?.html_or_markdown || ""}`;
+            if (!dedupeKey || seen.has(dedupeKey)) return false;
+            seen.add(dedupeKey);
+            return true;
+          });
+      }
+    } catch {
+      // Fall back to the old line-based format below.
+    }
+  }
+
+  const seen = new Set<string>();
+  return raw
+    .split("\n")
+    .map((entry, index) => {
+      const parts = entry.split("|").map((item) => item.trim());
+      const maybeRole = normalizeDescriptionRole(parts[0]);
+      const role = maybeRole ? maybeRole : "description";
+      const url = maybeRole ? parts[1] : parts[0];
+      if (!url) return null;
+      const key = normalizeMediaKey(url);
+      if (!key || seen.has(key)) return null;
+      seen.add(key);
+      const alt = maybeRole ? parts[2] || "" : parts[1] || "";
+      const caption = maybeRole ? parts[3] || "" : parts[2] || "";
+      const type = role === "spec_image" || role === "comparison" || role === "diagram" ? "spec_image" : "image";
+      return {
+        id: `desc_${index}_${Math.abs(hashText(key))}`,
+        type,
+        content: { imageRole: role },
+        media: { url, alt, role },
+        sortOrder: index,
+        altText: alt,
+        caption,
+        sourceType: "manual",
+        needsReview: !alt,
+      } satisfies ProductDescriptionBlock;
+    })
+    .filter((block): block is ProductDescriptionBlock => Boolean(block));
+}
+
+function normalizeDescriptionBlockDraft(value: unknown, index: number): ProductDescriptionBlock | null {
+  const block = value as ProductDescriptionBlock;
+  const rawType = String(block?.type || "").trim();
+  const textValue = String(block?.content?.text || block?.content?.html_or_markdown || block?.content?.markdown || "").trim();
+
+  if (rawType === "text" || (!block?.media?.url && textValue)) {
+    return {
+      id: block.id || `desc_text_${index}_${Math.abs(hashText(textValue))}`,
+      type: "text",
+      content: { text: textValue },
+      sortOrder: index,
+      sourceType: block.sourceType || block.source_type || "manual",
+      needsReview: false,
+    };
+  }
+
+  const role = normalizeDescriptionRole(block?.media?.role || block?.content?.imageRole || rawType) || "description";
+  const url = String(block?.media?.url || "").trim();
+  if (!url) return null;
+  const alt = String(block.altText || block.alt_text || block.media?.alt || "").trim();
+  const caption = String(block.caption || "").trim();
+  const type = role === "spec_image" || role === "comparison" || role === "diagram" ? "spec_image" : "image";
+  return {
+    id: block.id || `desc_${index}_${Math.abs(hashText(`${role}:${normalizeMediaKey(url)}`))}`,
+    type,
+    content: { imageRole: role },
+    media: {
+      url,
+      alt,
+      role,
+      width: block.media?.width,
+      height: block.media?.height,
+    },
+    sortOrder: index,
+    altText: alt,
+    caption,
+    sourceUrl: block.sourceUrl || block.source_url,
+    sourceType: block.sourceType || block.source_type || "manual",
+    extractedText: block.extractedText || block.extracted_text,
+    extractionConfidence: block.extractionConfidence || block.extraction_confidence,
+    needsReview: block.needsReview ?? block.needs_review ?? !alt,
+  };
+}
+
+function normalizeDescriptionRole(value: string) {
+  const role = String(value || "").trim().toLowerCase().replace(/-/g, "_");
+  if (["description", "feature", "spec_image", "comparison", "diagram", "unknown"].includes(role)) {
+    return role as NonNullable<ProductDescriptionBlock["media"]>["role"];
+  }
+  if (["spec", "specs", "technical", "chart"].includes(role)) return "spec_image";
+  if (["detail", "details"].includes(role)) return "description";
+  return null;
+}
+
+const productRelationshipTypes = new Set<ProductRelationship["relationshipType"]>([
+  "accessory",
+  "compatible",
+  "similar",
+  "alternative",
+  "same_brand",
+  "blocked",
+]);
+
+function serializeProductRelationships(relationships: ProductRelationship[] = []) {
+  const normalized = normalizeProductRelationshipDrafts(relationships);
+  return normalized.length ? JSON.stringify(normalized, null, 2) : "";
+}
+
+function parseProductRelationships(value: string): ProductRelationship[] {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return normalizeProductRelationshipDrafts(parsed);
+    } catch {
+      // Fall back to the compact line format below.
+    }
+  }
+
+  return normalizeProductRelationshipDrafts(
+    raw
+      .split("\n")
+      .map((line) => {
+        const [relationshipType, targetProductId, reason = "", priority = "0"] = line
+          .split("|")
+          .map((item) => item.trim());
+        return { relationshipType, targetProductId, reason, priority: Number(priority) };
+      }),
+  );
+}
+
+function normalizeProductRelationshipDrafts(value: unknown[]): ProductRelationship[] {
+  const seen = new Set<string>();
+  return value
+    .map((entry) => {
+      const relationship = entry as Partial<ProductRelationship> & {
+        target_product_id?: string;
+        relationship_type?: string;
+      };
+      const targetProductId = String(relationship.targetProductId || relationship.target_product_id || "").trim();
+      const relationshipType = normalizeProductRelationshipType(
+        relationship.relationshipType || relationship.relationship_type,
+      );
+      if (!targetProductId || !relationshipType) return null;
+      const key = `${relationshipType}:${targetProductId}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return {
+        targetProductId,
+        relationshipType,
+        reason: String(relationship.reason || "").trim().slice(0, 220),
+        priority: Number.isFinite(Number(relationship.priority)) ? Number(relationship.priority) : 0,
+        confidence: Number.isFinite(Number(relationship.confidence))
+          ? Math.max(0, Math.min(1, Number(relationship.confidence)))
+          : undefined,
+        active: relationship.active !== false,
+        source: relationship.source === "imported" || relationship.source === "automatic" ? relationship.source : "manual",
+      } satisfies ProductRelationship;
+    })
+    .filter((item): item is ProductRelationship => Boolean(item));
+}
+
+function normalizeProductRelationshipType(value: unknown): ProductRelationship["relationshipType"] | null {
+  const type = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s]+/g, "_");
+  if (type === "recommended_accessory" || type === "recommended_accessories") return "accessory";
+  if (type === "compatible_with") return "compatible";
+  if (type === "similar_products") return "similar";
+  if (type === "same_brand_products") return "same_brand";
+  return productRelationshipTypes.has(type as ProductRelationship["relationshipType"])
+    ? (type as ProductRelationship["relationshipType"])
+    : null;
+}
+
+function inferImportedProductRelationships(imported: ImportedDraft, products: ApiProduct[]): ProductRelationship[] {
+  const direct = normalizeProductRelationshipDrafts(imported.relationships || imported.productRelationships || []);
+  const inferred: ProductRelationship[] = [];
+  const existing = products.filter((product) => product.id);
+
+  for (const item of imported.strictProductData?.comparison_products || []) {
+    const match = existing.find((product) => {
+      const itemSlug = sameAdminKey(item.slug || item.title);
+      return (
+        sameAdminKey(product.slug) === itemSlug ||
+        sameAdminKey(product.name?.en) === sameAdminKey(item.title) ||
+        sameAdminKey(product.name?.ar) === sameAdminKey(item.title)
+      );
+    });
+    if (!match) continue;
+    inferred.push({
+      targetProductId: match.id,
+      relationshipType: "similar",
+      reason: "Imported comparison product from source data.",
+      priority: 4,
+      confidence: 0.82,
+      active: true,
+      source: "imported",
+    });
+  }
+
+  for (const label of imported.strictProductData?.recommended_accessories || []) {
+    const labelKey = sameAdminKey(label);
+    if (!labelKey) continue;
+    const match = existing.find((product) => {
+      if (sameAdminKey(product.category) !== "accessories") return false;
+      const productText = sameAdminKey([
+        product.name?.en,
+        product.name?.ar,
+        product.brand,
+        product.slug,
+        ...(product.subCategories || []),
+      ].filter(Boolean).join(" "));
+      if (labelKey.includes("ear-tip") || labelKey.includes("eartip")) return productText.includes("eartip") || productText.includes("ear-tip");
+      if (labelKey.includes("cable")) return productText.includes("cable");
+      if (labelKey.includes("case")) return productText.includes("case") || productText.includes("pouch");
+      return countSharedAdminTokens(labelKey, productText) >= 2;
+    });
+    if (!match) continue;
+    inferred.push({
+      targetProductId: match.id,
+      relationshipType: "accessory",
+      reason: `Imported accessory suggestion: ${label}`,
+      priority: 3,
+      confidence: 0.78,
+      active: true,
+      source: "imported",
+    });
+  }
+
+  return normalizeProductRelationshipDrafts([...direct, ...inferred]);
+}
+
+function countSharedAdminTokens(a: string, b: string) {
+  const left = new Set(a.split("-").filter((token) => token.length > 2));
+  const right = new Set(b.split("-").filter((token) => token.length > 2));
+  return [...left].filter((token) => right.has(token)).length;
+}
+
+function hashText(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return hash;
+}
+
 function normalizeSpecAuditKey(value: string) {
   return String(value || "")
     .toLowerCase()
@@ -663,16 +1010,102 @@ function getTaglineMismatch(category: string, tagline: string) {
 
 function getProductAdminFlags(product: ApiProduct) {
   const flags: string[] = [];
+  const quality = calculateProductQuality(product);
   if (!product.image && !product.normalizedImageUrl) flags.push("missing_image");
   if (!Number(product.price || 0)) flags.push("missing_price");
   if (!product.specs?.length) flags.push("missing_specs");
   if (!product.brand) flags.push("missing_brand");
   if (!product.category) flags.push("missing_category");
   if (!product.subCategories?.length) flags.push("missing_subcategory");
-  if (product.needsReview || product.status === "needs_review") flags.push("needs_review");
+  if (quality.needsReview) flags.push("needs_review");
   if (!product.seo?.metaTitle) flags.push("missing_meta_title");
   if (!product.seo?.metaDescription) flags.push("missing_meta_description");
   return flags;
+}
+
+function formatAdminStatusLabel(value?: string | null) {
+  return toDisplayLabel(value || "published");
+}
+
+function getAdminStatusTone(value?: string | null) {
+  switch (value) {
+    case "published":
+      return "border-emerald-400/35 bg-emerald-500/10 text-emerald-200";
+    case "draft":
+      return "border-border/45 bg-surface-lowest text-muted-foreground";
+    case "needs_review":
+      return "border-amber-400/35 bg-amber-500/10 text-amber-200";
+    case "hidden":
+    case "archived":
+      return "border-red-400/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-border/45 bg-surface-lowest text-muted-foreground";
+  }
+}
+
+function toDisplayLabel(value?: string | null) {
+  const normalized = String(value || "")
+    .trim()
+    .replaceAll("_", " ")
+    .replaceAll("-", " ");
+  if (!normalized) return "—";
+
+  const specialCases: Record<string, string> = {
+    dac: "DAC",
+    dacs: "DACs",
+    "dac amp": "DAC & AMP",
+    "dac amps": "DAC & AMPs",
+    iem: "IEM",
+    iems: "IEMs",
+  };
+  const key = normalized.toLowerCase().replace(/\s*&\s*/g, " ");
+  if (specialCases[key]) return specialCases[key];
+
+  return normalized.replace(/\b[a-z]/g, (char) => char.toUpperCase());
+}
+
+function getAdminCategoryLabel(product: ApiProduct) {
+  return toDisplayLabel(product.category);
+}
+
+function getAdminSubcategoryLabel(product: ApiProduct, primaryTerm?: ReturnType<typeof getPrimaryProductTerm>) {
+  if (primaryTerm) return getTermLabel(primaryTerm, "en");
+  return product.subCategories?.[0] ? toDisplayLabel(product.subCategories[0]) : "";
+}
+
+function getAdminAvailabilityLabel(product: ApiProduct) {
+  const status = product.availabilityStatus || (product.inStock ? "in_stock" : "out_of_stock");
+  const label = toDisplayLabel(status);
+  const stock = typeof product.stock === "number" ? product.stock : null;
+  if (status === "in_stock" && stock !== null) return `${label} · ${stock}`;
+  return label;
+}
+
+function getAdminAvailabilityTone(product: ApiProduct) {
+  const status = product.availabilityStatus || (product.inStock ? "in_stock" : "out_of_stock");
+  if (status === "in_stock") return "border-emerald-400/30 bg-emerald-500/10 text-emerald-200";
+  if (status === "pre_order") return "border-sky-400/30 bg-sky-500/10 text-sky-200";
+  if (status === "hidden" || status === "discontinued" || status === "out_of_stock") {
+    return "border-red-400/30 bg-red-500/10 text-red-200";
+  }
+  return "border-border/45 bg-surface-lowest text-muted-foreground";
+}
+
+function getAdminQualityToneClasses(score: number) {
+  const tone = getQualityTone(score);
+  if (tone === "good") return "border-emerald-400/35 bg-emerald-500/10 text-emerald-200";
+  if (tone === "warn") return "border-amber-400/35 bg-amber-500/10 text-amber-200";
+  return "border-red-400/30 bg-red-500/10 text-red-200";
+}
+
+function formatAdminFlagLabel(flag: string) {
+  return flag.replace(/^missing_/, "Missing ").replaceAll("_", " ");
+}
+
+function getProductIssueLabels(product: ApiProduct) {
+  const quality = calculateProductQuality(product);
+  const flags = getProductAdminFlags(product).map(formatAdminFlagLabel);
+  return [...new Set([...flags, ...quality.missing])];
 }
 
 function productMatchesSmartSelection(product: ApiProduct, selector: string) {
@@ -747,6 +1180,9 @@ const emptyForm: ProductFormState = {
   sales: "0",
   image: "",
   galleryText: "",
+  productPageText: "",
+  descriptionBlocksText: "",
+  relationshipsText: "",
   featuresText: "",
   specs: [makeSpec()],
 };
@@ -773,13 +1209,25 @@ const AdminProducts = () => {
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<ProductFormState>(emptyForm);
+  const [productPageBuilderTab, setProductPageBuilderTab] = useState<ProductPageBuilderTab>("description");
+  const [productPagePreviewTab, setProductPagePreviewTab] = useState<ProductPagePreviewTab>("description");
+  const [productPagePreviewDevice, setProductPagePreviewDevice] = useState<ProductPagePreviewDevice>("desktop");
   const [galleryDraft, setGalleryDraft] = useState("");
   const [draggedGalleryKey, setDraggedGalleryKey] = useState<string | null>(null);
+  const [draggedDescriptionBlockId, setDraggedDescriptionBlockId] = useState<string | null>(null);
   const [importMeta, setImportMeta] = useState<ImportMeta | null>(null);
+  const [enrichmentSourceUrl, setEnrichmentSourceUrl] = useState("");
+  const [enrichmentSourceHtml, setEnrichmentSourceHtml] = useState("");
+  const [enrichmentLoading, setEnrichmentLoading] = useState(false);
+  const [enrichmentApplying, setEnrichmentApplying] = useState(false);
+  const [enrichmentReport, setEnrichmentReport] = useState<EnrichmentReport | null>(null);
   const [strictImportData, setStrictImportData] = useState<StrictProductData | null>(null);
   const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
+  const [pendingImportedDraft, setPendingImportedDraft] = useState<ImportedDraft | null>(null);
+  const [researchDraft, setResearchDraft] = useState<AiResearchDraft | null>(null);
   const [existingImportMatch, setExistingImportMatch] = useState<ExistingImportMatch | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [detailProduct, setDetailProduct] = useState<ApiProduct | null>(null);
   const [bulkAction, setBulkAction] = useState<BulkAction>("reclassify");
   const [bulkAvailability, setBulkAvailability] = useState("in_stock");
   const [bulkStatus, setBulkStatus] = useState("published");
@@ -931,6 +1379,32 @@ const AdminProducts = () => {
       Number(product.confidenceScore ?? product.categoryAssignment?.confidenceScore ?? 1) < confidenceThreshold,
   ).length;
   const categoryTermOptions = useMemo(() => getDisplayCategoryTerms(bulkCategory || cat || "headphones"), [bulkCategory, cat]);
+  const formSubcategoryOptions = useMemo(() => {
+    const selectedTerms = parseCsv(form.subCategoriesText);
+    const taxonomyOptions = getDisplayCategoryTerms(form.category || cat || "headphones").map((term) => ({
+      value: term.slug,
+      label: `${getTermLabel(term, "en")} / ${getTermLabel(term, "ar")}`,
+      source: "taxonomy",
+    }));
+    const observedTerms = products
+      .filter((product) => !form.category || sameAdminKey(product.category) === sameAdminKey(form.category))
+      .flatMap((product) => product.subCategories || [])
+      .map((value) => sameAdminKey(value))
+      .filter(Boolean);
+
+    const options = new Map<string, { value: string; label: string; source: string }>();
+    for (const option of taxonomyOptions) options.set(sameAdminKey(option.value), option);
+    for (const term of [...observedTerms, ...selectedTerms]) {
+      const key = sameAdminKey(term);
+      if (!key || options.has(key)) continue;
+      options.set(key, { value: key, label: toDisplayLabel(key), source: "catalog" });
+    }
+
+    return [...options.values()].sort((left, right) => {
+      if (left.source !== right.source) return left.source === "taxonomy" ? -1 : 1;
+      return left.label.localeCompare(right.label);
+    });
+  }, [cat, form.category, form.subCategoriesText, products]);
   const smartSelectionOptions = useMemo(() => {
     const categoryOptions = categories.map((item) => ({
       value: `category:${item.slug}`,
@@ -970,8 +1444,8 @@ const AdminProducts = () => {
   );
   const trimmedImportSource = form.sourceUrl.trim();
   const importUsesUrl = looksLikeUrl(trimmedImportSource);
-  const importButtonLabel = importUsesUrl ? "Import URL" : "Search model";
-  const importPendingLabel = importUsesUrl ? "Importing..." : "Searching...";
+  const importButtonLabel = importUsesUrl ? "Research URL" : "Research Product";
+  const importPendingLabel = "Researching...";
   const importResolvedFromCatalog = Boolean(importMeta?.resolvedUrl?.startsWith("/product/"));
   const pipelineClassification = importMeta?.pipeline?.classification;
 
@@ -1217,6 +1691,8 @@ const AdminProducts = () => {
     setImportMeta(null);
     setStrictImportData(null);
     setImportCandidates([]);
+    setPendingImportedDraft(null);
+    setResearchDraft(null);
     setExistingImportMatch(null);
     setGalleryDraft("");
     setFormOpen(true);
@@ -1252,12 +1728,17 @@ const AdminProducts = () => {
       sales: String(product.sales ?? 0),
       image: product.image,
       galleryText: product.gallery.join("\n"),
+      productPageText: stringifyProductPage(product.productPage),
+      descriptionBlocksText: serializeDescriptionBlocks(product.descriptionBlocks || []),
+      relationshipsText: serializeProductRelationships(product.relationships || product.productRelationships || []),
       featuresText: product.features.join("\n"),
       specs: normalizeStorefrontSpecs(mappedSpecs),
     });
     setImportMeta(null);
     setStrictImportData(null);
     setImportCandidates([]);
+    setPendingImportedDraft(null);
+    setResearchDraft(null);
     setExistingImportMatch(null);
     setGalleryDraft("");
     setFormOpen(true);
@@ -1265,6 +1746,8 @@ const AdminProducts = () => {
 
   const applyImportedDraft = (imported: ImportedDraft) => {
     const importedGallery = imported.gallery?.length ? parseGalleryItems(imported.gallery.join("\n")) : [];
+    const importedDescriptionBlocks = imported.descriptionBlocks?.length ? serializeDescriptionBlocks(imported.descriptionBlocks) : "";
+    const importedRelationships = inferImportedProductRelationships(imported, products);
     const importedSpecs = imported.specs?.length
       ? imported.specs.map((spec) =>
           makeSpec({
@@ -1309,11 +1792,77 @@ const AdminProducts = () => {
             : current.officialPriceUsd,
       image: imported.image || importedGallery[0] || current.image,
       galleryText: importedGallery.length ? importedGallery.join("\n") : current.galleryText,
+      productPageText: current.productPageText,
+      descriptionBlocksText: importedDescriptionBlocks || current.descriptionBlocksText,
+      relationshipsText: importedRelationships.length
+        ? serializeProductRelationships(importedRelationships)
+        : current.relationshipsText,
       featuresText: imported.features?.length ? imported.features.join("\n") : current.featuresText,
       specs: importedSpecs ? normalizeStorefrontSpecs(importedSpecs) : current.specs,
     }));
     setImportMeta(imported.importMeta || null);
     setStrictImportData(imported.strictProductData || null);
+  };
+
+  const prepareResearchDraft = (
+    imported: ImportedDraft,
+    options: { sourceInput: string; candidates?: ImportCandidate[]; existingProduct?: ExistingImportMatch | null },
+  ) => {
+    const nextResearchDraft = createResearchDraftFromImported({
+      query: options.sourceInput,
+      imported,
+      candidates: options.candidates,
+      products,
+    });
+    setPendingImportedDraft(imported);
+    setResearchDraft(nextResearchDraft);
+    setImportCandidates(options.candidates || []);
+    setExistingImportMatch(
+      options.existingProduct ||
+        (nextResearchDraft.productDuplicate
+          ? {
+              id: nextResearchDraft.productDuplicate.id,
+              slug: nextResearchDraft.productDuplicate.slug,
+              nameEn: nextResearchDraft.productDuplicate.name,
+              brand: nextResearchDraft.productDuplicate.brand,
+              category: imported.category || "",
+              sourceUrl: imported.sourceUrl || "",
+              image: imported.image || "",
+              updatedAt: "",
+            }
+          : null),
+    );
+    setStrictImportData(imported.strictProductData || null);
+    setImportMeta(null);
+    setProductPageBuilderTab("ai_import");
+    return nextResearchDraft;
+  };
+
+  const applyPendingResearchDraft = () => {
+    if (!pendingImportedDraft || !researchDraft) {
+      toast({ title: "No research draft", description: "Run Research Product first, then review the draft before applying." });
+      return;
+    }
+    const validation = validateResearchDraft(researchDraft);
+    if (validation.errors.length) {
+      toast({
+        title: "Research draft blocked",
+        description: validation.errors.slice(0, 2).join(" "),
+        variant: "destructive",
+      });
+      return;
+    }
+
+    applyImportedDraft({
+      ...pendingImportedDraft,
+      productPage: researchDraft.productPageDraft || pendingImportedDraft.productPage,
+    });
+    if (researchDraft.productPageDraft) writeProductPageDraft(researchDraft.productPageDraft);
+    setProductPageBuilderTab("preview");
+    toast({
+      title: "Research applied to draft",
+      description: "The product form and Product Page Builder draft were updated. Review again before saving or publishing.",
+    });
   };
 
   const submitForm = async (event: React.FormEvent) => {
@@ -1328,6 +1877,18 @@ const AdminProducts = () => {
         ? parseGalleryItems([image, ...gallery].join("\n"))
         : gallery;
       const stock = Math.max(0, Number(form.stock || 0));
+      const descriptionBlocks = parseDescriptionBlocks(form.descriptionBlocksText);
+      const relationships = parseProductRelationships(form.relationshipsText);
+      const productPage = parseProductPageJson(form.productPageText);
+      if (form.productPageText.trim() && !productPage) {
+        throw new Error("Product Page Builder JSON is invalid. Validate it before saving.");
+      }
+      if (researchDraft) {
+        const validation = validateResearchDraft(researchDraft);
+        if (validation.errors.length) {
+          throw new Error(`Research Draft has blocking issues: ${validation.errors.slice(0, 2).join(" ")}`);
+        }
+      }
       const payload = {
         slug: form.slug.trim() || undefined,
         sourceUrl: form.sourceUrl.trim(),
@@ -1353,6 +1914,10 @@ const AdminProducts = () => {
         sales: Number(form.sales || 0),
         image,
         gallery: normalizedGallery,
+        productPage,
+        descriptionBlocks,
+        relationships,
+        productRelationships: relationships,
         features: parseMultiline(form.featuresText),
         specs: form.specs
           .filter((spec) => !isInternalSpecLabel(spec.labelEn || spec.labelAr))
@@ -1400,6 +1965,8 @@ const AdminProducts = () => {
         setImportMeta(null);
         setStrictImportData(null);
         setImportCandidates([]);
+        setPendingImportedDraft(null);
+        setResearchDraft(null);
         setExistingImportMatch(null);
       }
 
@@ -1438,15 +2005,17 @@ const AdminProducts = () => {
       });
 
       const imported = "draft" in response ? response.draft : response;
-      applyImportedDraft(imported);
-      setImportCandidates("draft" in response ? response.candidates || [] : []);
-      setExistingImportMatch("draft" in response ? response.existingProduct || null : null);
+      const nextResearchDraft = prepareResearchDraft(imported, {
+        sourceInput,
+        candidates: "draft" in response ? response.candidates || [] : [],
+        existingProduct: "draft" in response ? response.existingProduct || null : null,
+      });
 
       toast({
-        title: "Draft imported",
+        title: "Research draft ready",
         description: looksLikeUrl(sourceInput)
-          ? "Images and available details were pulled in from the product page."
-          : "We searched the web for this model and filled the product draft with the best match we found.",
+          ? `Review ${nextResearchDraft.sources.length} source(s), ${nextResearchDraft.images.length} image candidate(s), and warnings before applying.`
+          : "Review the best model match, source confidence, duplicate checks, and warnings before applying.",
       });
     } catch (nextError) {
       toast({
@@ -1458,6 +2027,83 @@ const AdminProducts = () => {
       });
     } finally {
       setImporting(false);
+    }
+  };
+
+  const runWebEnrichmentDryRun = async () => {
+    if (!token) return;
+    if (!selectedIds.size) {
+      toast({ title: "Select products first", description: "Web enrichment previews run only against selected products." });
+      return;
+    }
+
+    setEnrichmentLoading(true);
+    try {
+      const sourceUrl = enrichmentSourceUrl.trim();
+      const sourceHtml = enrichmentSourceHtml.trim();
+      const sourceDocuments = sourceUrl || sourceHtml
+        ? [
+            {
+              productId: selectedIds.size === 1 ? [...selectedIds][0] : undefined,
+              url: sourceUrl,
+              html: sourceHtml,
+              sourceType: sourceUrl.includes("linsoul.com") || sourceUrl.includes("hifigo.com") ? "authorized_retailer" : "retailer",
+            },
+          ]
+        : [];
+      const response = await apiRequest<EnrichmentReport>("/api/admin/products/enrichment/dry-run", {
+        method: "POST",
+        token,
+        body: {
+          productIds: [...selectedIds],
+          sourceDocuments,
+          limit: selectedIds.size,
+        },
+      });
+      setEnrichmentReport(response);
+      toast({
+        title: "Enrichment preview ready",
+        description: `${response.summary.products_safe_to_enrich} safe, ${response.summary.products_needing_review} need review. No product data was changed.`,
+      });
+    } catch (nextError) {
+      toast({
+        title: "Enrichment dry-run failed",
+        description: nextError instanceof ApiError ? nextError.message : "Unable to create enrichment preview.",
+      });
+    } finally {
+      setEnrichmentLoading(false);
+    }
+  };
+
+  const applyWebEnrichmentSafeRows = async () => {
+    if (!token || !enrichmentReport) return;
+    if (!enrichmentReport.summary.products_safe_to_enrich) {
+      toast({ title: "Nothing safe to apply", description: "Only exact high-confidence matches can be applied." });
+      return;
+    }
+
+    setEnrichmentApplying(true);
+    try {
+      const result = await apiRequest<EnrichmentApplyResult>("/api/admin/products/enrichment/apply", {
+        method: "POST",
+        token,
+        body: {
+          mode: "apply_safe_only",
+          plan: enrichmentReport,
+        },
+      });
+      toast({
+        title: "Safe enrichment applied",
+        description: `${result.applied_products} products updated with ${result.description_images_added} description images and ${result.spec_images_added} spec images.`,
+      });
+      await loadProducts();
+    } catch (nextError) {
+      toast({
+        title: "Enrichment apply failed",
+        description: nextError instanceof ApiError ? nextError.message : "Unable to apply safe enrichment rows.",
+      });
+    } finally {
+      setEnrichmentApplying(false);
     }
   };
 
@@ -1554,6 +2200,70 @@ const AdminProducts = () => {
     setForm((current) => ({ ...current, price: applyNinePricingToValue(current.price) }));
   };
 
+  const toggleFormSubcategory = (value: string) => {
+    const normalized = sameAdminKey(value);
+    if (!normalized) return;
+    setForm((current) => {
+      const terms = parseCsv(current.subCategoriesText);
+      const hasTerm = terms.some((term) => sameAdminKey(term) === normalized);
+      const nextTerms = hasTerm ? terms.filter((term) => sameAdminKey(term) !== normalized) : [...terms, normalized];
+      return { ...current, subCategoriesText: nextTerms.join(", ") };
+    });
+  };
+
+  const writeProductPageDraft = (draft: ProductPageContent | undefined) => {
+    setForm((current) => ({ ...current, productPageText: stringifyProductPage(draft) }));
+  };
+
+  const generateProductPageDraftFromForm = () => {
+    writeProductPageDraft(buildProductPageDraft(draftProductForBuilder));
+    setProductPageBuilderTab("preview");
+    toast({
+      title: "Product page draft created",
+      description: "Review the builder tabs, source references, and media license warnings before publishing.",
+    });
+  };
+
+  const validateProductPageDraft = () => {
+    const validation = validateProductPageContent(draftProductForBuilder, productPageDraft);
+    toast({
+      title: validation.errors.length ? "Product page has blocking issues" : "Product page validation finished",
+      description: `${validation.errors.length} error(s), ${validation.warnings.length} warning(s), score ${validation.score}%.`,
+    });
+  };
+
+  const runProductResearchDryRun = () => {
+    const baseDraft = productPageDraft || buildProductPageDraft(draftProductForBuilder);
+    const sourceUrl = form.sourceUrl.trim();
+    const sourceExists = sourceUrl && !baseDraft.sources?.some((source) => source.url === sourceUrl);
+    const nextDraft = normalizeProductPageContent({
+      ...baseDraft,
+      contentStatus: "needs_research",
+      sources: sourceExists
+        ? [
+            ...(baseDraft.sources || []),
+            {
+              id: `source_${Date.now()}`,
+              title: `${form.brand || "Product"} source candidate`,
+              url: sourceUrl,
+              sourceType: "manufacturer",
+              confidence: "medium",
+              usedFields: ["description", "specs", "images"],
+              notes: "Dry-run source candidate. Review license and facts before applying.",
+            },
+          ]
+        : baseDraft.sources || [],
+      seoWarnings: Array.from(new Set([...(baseDraft.seoWarnings || []), "Research dry-run only. Review sources before publishing."])),
+      updatedAt: new Date().toISOString(),
+    });
+    writeProductPageDraft(nextDraft);
+    setProductPageBuilderTab("sources");
+    toast({
+      title: "Research dry-run prepared",
+      description: "No web scraping or live overwrite was performed. Review sources and apply manually.",
+    });
+  };
+
   const addGalleryItems = (rawValue: string) => {
     const candidates = parseGalleryItems(
       String(rawValue || "")
@@ -1568,6 +2278,144 @@ const AdminProducts = () => {
     const nextItems = parseGalleryItems(items.join("\n"));
     if (!nextItems.length) return;
     updateGallery([...parseGalleryItems(form.galleryText), ...nextItems]);
+  };
+
+  const updateDescriptionBlocks = (blocks: ProductDescriptionBlock[]) => {
+    setForm((current) => ({
+      ...current,
+      descriptionBlocksText: serializeDescriptionBlocks(blocks),
+    }));
+  };
+
+  const makeDescriptionTextBlock = (text = ""): ProductDescriptionBlock => ({
+    id: `desc_text_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    type: "text",
+    content: { text },
+    sourceType: "manual",
+    needsReview: false,
+  });
+
+  const makeDescriptionImageBlock = (
+    url = "",
+    role: NonNullable<ProductDescriptionBlock["media"]>["role"] = "description",
+  ): ProductDescriptionBlock => ({
+    id: `desc_image_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    type: role === "spec_image" || role === "comparison" || role === "diagram" ? "spec_image" : "image",
+    content: { imageRole: role },
+    media: { url, alt: "", role },
+    altText: "",
+    caption: "",
+    sourceType: "manual",
+    needsReview: true,
+  });
+
+  const addDescriptionTextBlock = () => {
+    updateDescriptionBlocks([...descriptionBlockItems, makeDescriptionTextBlock()]);
+  };
+
+  const addDescriptionImageBlock = (url = "", role: NonNullable<ProductDescriptionBlock["media"]>["role"] = "description") => {
+    updateDescriptionBlocks([...descriptionBlockItems, makeDescriptionImageBlock(url, role)]);
+  };
+
+  const addDescriptionBlockFromGallery = (url: string) => {
+    const resolved = url.trim();
+    if (!resolved) return;
+    addDescriptionImageBlock(resolved, "description");
+    toast({ title: "Added to description", description: "The gallery image is now a visual description block." });
+  };
+
+  const patchDescriptionBlock = (index: number, patch: Partial<ProductDescriptionBlock>) => {
+    const nextBlocks = descriptionBlockItems.map((block, blockIndex) => {
+      if (blockIndex !== index) return block;
+      const nextRole = normalizeDescriptionRole(
+        patch.media?.role || patch.content?.imageRole || block.media?.role || block.content?.imageRole || block.type,
+      ) || "description";
+      const nextUrl = patch.media?.url ?? block.media?.url ?? "";
+      const nextAlt = patch.altText ?? patch.alt_text ?? patch.media?.alt ?? block.altText ?? block.alt_text ?? block.media?.alt ?? "";
+      const nextCaption = patch.caption ?? block.caption ?? "";
+      const nextText = patch.content?.text ?? patch.content?.html_or_markdown ?? block.content?.text ?? block.content?.html_or_markdown ?? "";
+
+      if ((patch.type || block.type) === "text") {
+        return {
+          ...block,
+          ...patch,
+          type: "text",
+          content: { text: nextText },
+          media: undefined,
+          altText: undefined,
+          caption: undefined,
+          needsReview: false,
+        };
+      }
+
+      return {
+        ...block,
+        ...patch,
+        type: nextRole === "spec_image" || nextRole === "comparison" || nextRole === "diagram" ? "spec_image" : "image",
+        content: { ...(block.content || {}), ...(patch.content || {}), imageRole: nextRole },
+        media: { ...(block.media || { url: "" }), ...(patch.media || {}), url: nextUrl, alt: nextAlt, role: nextRole },
+        altText: nextAlt,
+        caption: nextCaption,
+        needsReview: !nextAlt,
+      };
+    });
+    updateDescriptionBlocks(nextBlocks);
+  };
+
+  const removeDescriptionBlock = (index: number) => {
+    updateDescriptionBlocks(descriptionBlockItems.filter((_, blockIndex) => blockIndex !== index));
+  };
+
+  const moveDescriptionBlock = (fromIndex: number, toIndex: number) => {
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+    const nextBlocks = [...descriptionBlockItems];
+    const [moved] = nextBlocks.splice(fromIndex, 1);
+    nextBlocks.splice(toIndex, 0, moved);
+    updateDescriptionBlocks(nextBlocks);
+  };
+
+  const uploadDescriptionMedia = async (files: FileList | File[]) => {
+    if (!token) return;
+    const selectedFiles = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (!selectedFiles.length) {
+      toast({ title: "No images selected", description: "Choose one or more description image files." });
+      return;
+    }
+
+    setUploadingMedia(true);
+    try {
+      const encodedFiles = await Promise.all(
+        selectedFiles.slice(0, 12).map(async (file) => ({
+          name: file.name,
+          type: file.type,
+          data: await readFileAsDataUrl(file),
+        })),
+      );
+      const response = await apiRequest<UploadedProductMedia>("/api/admin/products/media", {
+        method: "POST",
+        token,
+        body: {
+          seed: `${form.nameEn || form.brand || "product"} description`,
+          files: encodedFiles,
+        },
+      });
+      const newBlocks = response.media
+        .map((item) => item.url)
+        .filter(Boolean)
+        .map((url) => makeDescriptionImageBlock(url, "description"));
+      updateDescriptionBlocks([...descriptionBlockItems, ...newBlocks]);
+      toast({
+        title: "Description images uploaded",
+        description: `${newBlocks.length} image${newBlocks.length === 1 ? "" : "s"} added to the product description.`,
+      });
+    } catch (nextError) {
+      toast({
+        title: "Upload failed",
+        description: nextError instanceof ApiError ? nextError.message : "Unable to upload these description images.",
+      });
+    } finally {
+      setUploadingMedia(false);
+    }
   };
 
   const uploadProductMedia = async (files: FileList | File[]) => {
@@ -1638,7 +2486,7 @@ const AdminProducts = () => {
       setGalleryDraft("");
       toast({
         title: "Images stored locally",
-        description: `${storedUrls.length} image${storedUrls.length === 1 ? "" : "s"} copied into EDIO media.`,
+        description: `${storedUrls.length} image${storedUrls.length === 1 ? "" : "s"} copied into edio media.`,
       });
     } catch (nextError) {
       toast({
@@ -1651,6 +2499,7 @@ const AdminProducts = () => {
   };
 
   const galleryItems = parseGalleryItems(form.galleryText);
+  const descriptionBlockItems = parseDescriptionBlocks(form.descriptionBlocksText);
   const activeCoverKey = normalizeMediaKey(form.image);
   const previewGalleryItems = galleryItems
     .filter((item) => normalizeMediaKey(item) !== activeCoverKey)
@@ -1666,6 +2515,28 @@ const AdminProducts = () => {
   const completedSpecs = form.specs.filter(
     (spec) => !isInternalSpecLabel(spec.labelEn || spec.labelAr) && spec.labelEn.trim() && spec.value.trim(),
   );
+  const productPageDraft = parseProductPageJson(form.productPageText);
+  const draftProductForBuilder = {
+    id: form.id || "draft",
+    slug: form.slug.trim(),
+    sourceUrl: form.sourceUrl.trim(),
+    name: { en: form.nameEn.trim(), ar: form.nameAr.trim() || form.nameEn.trim() },
+    brand: form.brand.trim(),
+    category: form.category.trim(),
+    subCategories: parseCsv(form.subCategoriesText),
+    tagline: { en: form.taglineEn.trim(), ar: form.taglineAr.trim() || form.taglineEn.trim() },
+    price: Number(form.price || 0),
+    currency: "IQD" as const,
+    image: form.image.trim() || galleryItems[0] || "",
+    gallery: galleryItems,
+    specs: completedSpecs.map((spec) => ({ label: spec.labelEn.trim() || spec.labelAr.trim(), value: spec.value.trim() })),
+  };
+  const productPageValidation = validateProductPageContent(draftProductForBuilder, productPageDraft);
+  const productPageBlocks = productPageDraft?.description?.blocks?.filter((block) => block.visible !== false) || [];
+  const productPageSpecGroups = productPageDraft?.specs?.groups || [];
+  const productPageMediaItems = productPageDraft?.media || [];
+  const productPageSourceItems = productPageDraft?.sources || [];
+  const researchValidation = validateResearchDraft(researchDraft || undefined);
   const coverIsInGallery = !activeCoverKey || galleryItems.some((item) => normalizeMediaKey(item) === activeCoverKey);
   const taglineLength = form.taglineEn.trim().length;
   const categoryAuditRule = getCategoryAuditRule(form.category);
@@ -1720,6 +2591,23 @@ const AdminProducts = () => {
       : readinessScore >= 63
         ? "text-amber-200 border-amber-500/30 bg-amber-500/10"
         : "text-red-300 border-red-500/30 bg-red-500/10";
+  const formQuality = calculateProductQuality({
+    image: form.image,
+    gallery: galleryItems,
+    price: Number(form.price || 0),
+    inStock: form.inStock,
+    stock: Number(form.stock || 0),
+    brand: form.brand,
+    category: form.category,
+    subCategories: parseCsv(form.subCategoriesText),
+    tagline: { en: form.taglineEn, ar: form.taglineAr },
+    features: featureItems,
+    specs: completedSpecs.map((spec) => ({
+      label: { en: spec.labelEn, ar: spec.labelAr },
+      value: spec.value,
+    })),
+  });
+  const formQualityTone = getQualityTone(formQuality.score);
   const nextReadinessGap = readinessChecks.find((item) => !item.passed) || null;
   const storefrontStructureLine = [
     `${highlightItems.length} highlights`,
@@ -1776,7 +2664,7 @@ const AdminProducts = () => {
                   Build a cleaner audio catalog.
                 </h2>
                 <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground md:text-base">
-                  Import, classify, audit, and publish EDIO products from one focused surface.
+                  Import, classify, audit, and publish edio products from one focused surface.
                 </p>
               </div>
               <div className="grid grid-cols-3 gap-2">
@@ -1785,7 +2673,7 @@ const AdminProducts = () => {
                   ["Live stock", activeInventoryCount, "available"],
                   ["Badged", featuredCount, "curated"],
                 ].map(([label, value, caption]) => (
-                  <div key={label} className="border border-border/35 bg-surface-lowest/50 p-3">
+                  <div key={label} className="p-3">
                     <p className="label-tech text-[0.58rem]">{label}</p>
                     <p className="mt-2 font-display text-2xl font-bold tabular-nums text-foreground">{value}</p>
                     <p className="mt-1 text-[10px] font-mono uppercase tracking-[0.14em] text-muted-foreground">{caption}</p>
@@ -1847,7 +2735,7 @@ const AdminProducts = () => {
             onClick={openCreate}
             className="admin-cta group inline-flex items-center gap-3 px-5 py-2.5 text-[11px] font-semibold uppercase tracking-widest"
           >
-            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/16 transition-transform duration-500 group-hover:translate-x-0.5 group-hover:-translate-y-0.5">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/16 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5">
               <Plus className="h-3.5 w-3.5" />
             </span>
             Add product
@@ -1990,24 +2878,28 @@ const AdminProducts = () => {
         ) : null}
 
         <div className="admin-bezel">
-          <div className="admin-core p-4">
-            <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="admin-core p-3 md:p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="label-tech mb-2 text-primary">Classification engine</p>
-                <h2 className="font-display text-xl font-bold">Existing taxonomy only</h2>
-                <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-                  Dry-run classification preserves WordPress terms when valid, scores evidence, and queues uncertain products for review.
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="label-tech text-primary">Classification engine</p>
+                  <span className="rounded-full border border-border/35 px-2.5 py-1 text-[10px] text-muted-foreground">
+                    Existing taxonomy only
+                  </span>
+                </div>
+                <p className="mt-2 max-w-3xl text-xs leading-5 text-muted-foreground md:text-sm">
+                  Dry-run classification preserves valid terms and queues uncertain products for review.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-border/40 px-3 py-2 text-xs text-muted-foreground">
+                <span className="rounded-full border border-border/40 px-3 py-1.5 text-xs text-muted-foreground">
                   {visibleReviewCount} visible need review
                 </span>
                 <button
                   type="button"
                   onClick={() => void selectClassificationReviewQueue()}
                   disabled={classificationLoading}
-                  className="admin-ghost inline-flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground disabled:opacity-60"
+                  className="admin-ghost inline-flex min-h-10 items-center gap-2 px-3 py-2 text-xs text-muted-foreground disabled:opacity-60"
                 >
                   {classificationLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListFilter className="h-3.5 w-3.5" />}
                   Select review queue
@@ -2016,7 +2908,8 @@ const AdminProducts = () => {
                   type="button"
                   onClick={() => void requestClassificationPreview()}
                   disabled={!selectedIds.size || classificationLoading}
-                  className="admin-cta inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest disabled:opacity-60"
+                  className="admin-cta inline-flex min-h-10 items-center gap-2 px-4 py-2 text-[11px] font-semibold uppercase tracking-widest disabled:cursor-not-allowed disabled:opacity-50"
+                  title={!selectedIds.size ? "Select products before running classification" : "Dry-run selected products"}
                 >
                   {classificationLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                   Dry-run selected
@@ -2042,38 +2935,52 @@ const AdminProducts = () => {
         <div className="admin-bezel">
           <div className="admin-core overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-surface-lowest/70 text-left">
-              <tr className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
-                <th className="px-4 py-3">
+          <table className="w-full min-w-[1120px] table-fixed text-sm">
+            <colgroup>
+              <col className="w-[56px]" />
+              <col className="w-[31%]" />
+              <col className="w-[12%]" />
+              <col className="w-[14%]" />
+              <col className="w-[12%]" />
+              <col className="w-[12%]" />
+              <col className="w-[10%]" />
+              <col className="w-[8%]" />
+              <col className="w-[9%]" />
+              <col className="w-[150px]" />
+            </colgroup>
+            <thead className="sticky top-0 z-10 bg-surface-lowest/95 text-left backdrop-blur">
+              <tr className="text-[10px] font-mono uppercase tracking-[0.16em] text-muted-foreground">
+                <th className="px-3 py-3">
                   <button
                     type="button"
                     onClick={toggleVisibleSelection}
                     className={cn(
-                      "inline-flex h-7 w-7 items-center justify-center rounded-sm border transition-colors",
+                      "inline-flex h-8 w-8 items-center justify-center rounded-[4px] border transition-colors",
                       allVisibleSelected
                         ? "border-primary bg-primary text-primary-foreground"
-                        : "border-border/50 text-muted-foreground hover:border-primary/60 hover:text-primary",
+                        : "border-border/70 bg-surface-lowest text-muted-foreground hover:border-primary/60 hover:text-primary",
                     )}
                     aria-label={allVisibleSelected ? "Unselect all visible products" : "Select all visible products"}
                   >
                     {allVisibleSelected ? <Check className="h-3.5 w-3.5" /> : null}
                   </button>
                 </th>
-                <th className="px-4 py-3">Product</th>
-                <th className="px-4 py-3">Brand</th>
-                <th className="px-4 py-3">Category</th>
-                <th className="px-4 py-3">Price</th>
-                <th className="px-4 py-3">Stock</th>
-                <th className="px-4 py-3">Badge</th>
-                <th className="px-4 py-3" />
+                <th className="px-3 py-3">Product</th>
+                <th className="px-3 py-3">Brand</th>
+                <th className="px-3 py-3">Category</th>
+                <th className="px-3 py-3">Price</th>
+                <th className="px-3 py-3">Availability</th>
+                <th className="px-3 py-3">Status</th>
+                <th className="px-3 py-3">Quality</th>
+                <th className="px-3 py-3">Issues</th>
+                <th className="px-3 py-3 text-end">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
               {loading &&
                 Array.from({ length: 8 }).map((_, index) => (
                   <tr key={`loading-${index}`}>
-                    <td colSpan={8} className="px-4 py-4">
+                    <td colSpan={10} className="px-4 py-4">
                       <div className="h-12 animate-pulse bg-surface-high/70" />
                     </td>
                   </tr>
@@ -2082,131 +2989,168 @@ const AdminProducts = () => {
               {!loading &&
                 products.map((product) => {
                   const selected = selectedIds.has(product.id);
+                  const quality = calculateProductQuality(product);
                   const flags = getProductAdminFlags(product);
                   const primaryTerm = getPrimaryProductTerm(product);
-                  const assignment = product.categoryAssignment;
+                  const issueCount = getProductIssueLabels(product).length;
+                  const missingPrice = !Number(product.price || 0);
+                  const subcategoryLabel = getAdminSubcategoryLabel(product, primaryTerm);
                   return (
-                  <tr key={product.id} className={cn("smooth hover:bg-primary/5", selected && "bg-primary/[0.07]")}>
-                    <td className="px-4 py-3">
+                  <tr
+                    key={product.id}
+                    className={cn(
+                      "smooth group/row hover:bg-surface-high/45",
+                      selected && "bg-primary/[0.08] hover:bg-primary/[0.1]",
+                      flags.includes("needs_review") && !selected && "bg-amber-500/[0.025]",
+                      quality.score < 70 && !selected && "bg-red-500/[0.025]",
+                      !product.inStock && !selected && "opacity-[0.92]",
+                    )}
+                  >
+                    <td className="px-3 py-3 align-middle">
                       <button
                         type="button"
                         onClick={() => toggleProductSelection(product.id)}
                         className={cn(
-                          "inline-flex h-7 w-7 items-center justify-center rounded-sm border transition-colors",
+                          "inline-flex h-8 w-8 items-center justify-center rounded-[4px] border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/45",
                           selected
                             ? "border-primary bg-primary text-primary-foreground"
-                            : "border-border/50 text-muted-foreground hover:border-primary/60 hover:text-primary",
+                            : "border-border/70 bg-surface-lowest text-muted-foreground hover:border-primary/60 hover:text-primary",
                         )}
                         aria-label={selected ? `Unselect ${product.name.en}` : `Select ${product.name.en}`}
                       >
                         {selected ? <Check className="h-3.5 w-3.5" /> : null}
                       </button>
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <ProductThumb src={product.normalizedImageUrl || product.image} alt={product.name.en} />
+                    <td className="px-3 py-3 align-middle">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <ProductThumb src={product.normalizedImageUrl || product.image} alt={product.name.en} size="list" />
                         <div className="min-w-0">
-                          <p className="max-w-[280px] truncate text-sm font-medium">{product.name.en}</p>
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                            <p className="font-mono text-[10px] text-muted-foreground">{readableProductHandle(product)}</p>
-                            {flags.includes("needs_review") ? (
-                              <span className="rounded-sm border border-amber-400/35 px-1.5 py-0.5 text-[9px] uppercase tracking-widest text-amber-200">
-                                review
-                              </span>
+                          <p className="truncate text-[15px] font-semibold leading-5 text-foreground">{product.name.en}</p>
+                          <div className="mt-1 flex min-w-0 items-center gap-2">
+                            {product.badge === "preowned" ? (
+                              <span className="rounded-full border border-border/40 px-2 py-0.5 text-[10px] text-muted-foreground">Pre-owned</span>
                             ) : null}
-                            {flags.filter((flag) => flag.startsWith("missing_")).slice(0, 2).map((flag) => (
-                              <span
-                                key={`${product.id}-${flag}`}
-                                className="rounded-sm border border-red-400/30 px-1.5 py-0.5 text-[9px] uppercase tracking-widest text-red-200"
-                              >
-                                {flag.replace("missing_", "")}
-                              </span>
-                            ))}
+                            <button
+                              type="button"
+                              onClick={() => setDetailProduct(product)}
+                              className="truncate text-xs text-muted-foreground transition-colors hover:text-primary"
+                              title={product.slug || readableProductHandle(product)}
+                            >
+                              Details
+                            </button>
                           </div>
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground">{product.brand}</td>
-                    <td className="px-4 py-3 text-muted-foreground">
-                      <div className="space-y-1">
-                        <p>{product.category}</p>
-                        {primaryTerm ? (
-                          <p className="text-[10px] font-mono uppercase tracking-[0.12em] text-primary">
-                            {getTermLabel(primaryTerm, "en")}
-                          </p>
-                        ) : null}
-                        {assignment ? (
-                          <span
-                            className={cn(
-                              "inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] font-mono",
-                              assignment.needsReview
-                                ? "border-amber-400/35 bg-amber-500/10 text-amber-200"
-                                : "border-emerald-400/35 bg-emerald-500/10 text-emerald-200",
-                            )}
-                          >
-                            {Math.round(assignment.confidenceScore * 100)}%
-                          </span>
-                        ) : null}
-                      </div>
+                    <td className="px-3 py-3 align-middle">
+                      <p className="truncate text-sm font-medium text-foreground/90">{product.brand || "—"}</p>
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="space-y-1 font-mono tabular-nums">
-                        <p>{formatPrice(product.price, "en", currency)}</p>
-                        {product.compareAt ? (
-                          <p className="text-[10px] text-muted-foreground line-through">
-                            {formatPrice(product.compareAt, "en", currency)}
+                    <td className="px-3 py-3 align-middle">
+                      <div className="min-w-0 space-y-1">
+                        <p className="truncate text-sm font-medium text-foreground/90">{getAdminCategoryLabel(product)}</p>
+                        {subcategoryLabel ? (
+                          <p className="truncate text-xs text-muted-foreground">
+                            {subcategoryLabel}
                           </p>
                         ) : null}
                       </div>
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="space-y-1">
-                        <span
+                    <td className="px-3 py-3 align-middle">
+                      <div className="space-y-1 tabular-nums">
+                        <p
                           className={cn(
-                            "text-[11px] font-mono",
-                            product.inStock ? "text-emerald-400" : "text-red-400",
+                            "text-sm font-semibold text-foreground",
+                            missingPrice && "text-amber-200",
                           )}
                         >
-                          {product.inStock ? "In stock" : "Out of stock"}
-                        </span>
-                        <p className="text-[10px] font-mono text-muted-foreground">{product.stock} units</p>
-                        {product.availabilityStatus && product.availabilityStatus !== (product.inStock ? "in_stock" : "out_of_stock") ? (
-                          <p className="text-[10px] font-mono uppercase tracking-[0.12em] text-amber-200">
-                            {product.availabilityStatus.replaceAll("_", " ")}
+                          {missingPrice ? "Missing price" : formatPrice(product.price, "en", currency)}
+                        </p>
+                        {product.compareAt ? (
+                          <p className="text-[11px] text-muted-foreground line-through">
+                            was {formatPrice(product.compareAt, "en", currency)}
                           </p>
                         ) : null}
                       </div>
                     </td>
-                    <td className="px-4 py-3">
-                      {product.badge ? (
-                        <span className="rounded-full border border-primary/40 bg-primary/10 px-2.5 py-1 text-[10px] font-mono uppercase tracking-widest text-primary">
-                          {product.badge}
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-mono text-muted-foreground">—</span>
-                      )}
+                    <td className="px-3 py-3 align-middle">
+                      <span
+                        className={cn(
+                          "inline-flex max-w-full items-center rounded-full border px-2.5 py-1 text-xs font-medium",
+                          getAdminAvailabilityTone(product),
+                        )}
+                      >
+                        <span className="truncate">{getAdminAvailabilityLabel(product)}</span>
+                      </span>
                     </td>
-                    <td className="px-4 py-3 text-end">
-                      <div className="inline-flex items-center gap-1">
+                    <td className="px-3 py-3 align-middle">
+                      <span
+                        className={cn(
+                          "inline-flex max-w-full rounded-full border px-2.5 py-1 text-xs font-medium",
+                          getAdminStatusTone(product.status),
+                        )}
+                      >
+                        <span className="truncate">{formatAdminStatusLabel(product.status)}</span>
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 align-middle">
+                      <span
+                        className={cn(
+                          "inline-flex min-w-14 justify-center rounded-full border px-2.5 py-1 text-xs font-semibold tabular-nums",
+                          getAdminQualityToneClasses(quality.score),
+                        )}
+                        title={quality.missing.length ? `Product quality score. Missing: ${quality.missing.slice(0, 4).join(", ")}` : "Product quality score is strong"}
+                      >
+                        {quality.score}%
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 align-middle">
+                      <button
+                        type="button"
+                        onClick={() => setDetailProduct(product)}
+                        className={cn(
+                          "inline-flex min-w-20 items-center justify-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                          issueCount
+                            ? "border-amber-400/35 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
+                            : "border-emerald-400/35 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15",
+                        )}
+                        aria-label={`View ${product.name.en} issues`}
+                        title={issueCount ? "Open product issues and missing fields" : "No product issues detected"}
+                      >
+                        {issueCount} {issueCount === 1 ? "issue" : "issues"}
+                        {flags.includes("needs_review") ? <AlertTriangle className="h-3 w-3" /> : null}
+                      </button>
+                    </td>
+                    <td className="px-3 py-3 text-end align-middle">
+                      <div className="inline-flex items-center gap-1.5">
+                        <button
+                          onClick={() => setDetailProduct(product)}
+                          className="admin-ghost inline-flex h-9 w-9 items-center justify-center text-muted-foreground hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                          aria-label="Details"
+                          title="Details"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
                         <button
                           onClick={() => openEdit(product)}
-                          className="admin-ghost inline-flex h-8 w-8 items-center justify-center text-muted-foreground"
-                          aria-label="Edit"
+                          className="admin-ghost inline-flex h-9 w-9 items-center justify-center text-muted-foreground hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                          aria-label={`Edit ${product.name.en}`}
+                          title="Edit product"
                         >
                           <Edit2 className="h-3.5 w-3.5" />
                         </button>
                         <button
                           onClick={() => void duplicateProduct(product)}
-                          className="admin-ghost inline-flex h-8 w-8 items-center justify-center text-muted-foreground hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                          className="admin-ghost inline-flex h-9 w-9 items-center justify-center text-muted-foreground hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                           aria-label={`Clone ${product.name.en}`}
-                          title="Clone product with the same details"
+                          title="Duplicate product"
                         >
                           <Copy className="h-3.5 w-3.5" />
                         </button>
                         <button
                           onClick={() => void removeProduct(product)}
-                          className="admin-ghost inline-flex h-8 w-8 items-center justify-center text-muted-foreground hover:border-red-400/45 hover:bg-red-500/10 hover:text-red-300"
-                          aria-label="Delete"
+                          className="admin-ghost inline-flex h-9 w-9 items-center justify-center text-muted-foreground hover:border-red-400/45 hover:bg-red-500/10 hover:text-red-300"
+                          aria-label={`Delete ${product.name.en}`}
+                          title="Delete product"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -2218,7 +3162,7 @@ const AdminProducts = () => {
 
               {!loading && products.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
+                  <td colSpan={10} className="px-4 py-12 text-center text-muted-foreground">
                     No products match.
                   </td>
                 </tr>
@@ -2229,6 +3173,190 @@ const AdminProducts = () => {
           </div>
         </div>
       </div>
+
+      {detailProduct
+        ? (() => {
+            const quality = calculateProductQuality(detailProduct);
+            const issueLabels = getProductIssueLabels(detailProduct);
+            const assignment = detailProduct.categoryAssignment;
+            const imageCount =
+              Number(Boolean(detailProduct.normalizedImageUrl || detailProduct.image)) +
+              (detailProduct.gallery || []).filter(Boolean).length;
+            const specCount = (detailProduct.specs || []).filter((spec) => spec.value && String(spec.value).trim()).length;
+            const seoItems = [
+              ["Meta title", detailProduct.seo?.metaTitle || "Missing"],
+              ["Meta description", detailProduct.seo?.metaDescription || "Missing"],
+              ["Slug", detailProduct.slug || "Missing"],
+            ];
+
+            return (
+              <div className="fixed inset-0 z-[75] flex justify-end bg-background/70 backdrop-blur-md">
+                <button
+                  type="button"
+                  className="absolute inset-0 cursor-default"
+                  onClick={() => setDetailProduct(null)}
+                  aria-label="Close product details"
+                />
+                <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-border/35 bg-background shadow-[0_24px_100px_-40px_rgba(0,0,0,0.75)]">
+                  <div className="flex items-start justify-between gap-4 border-b border-border/30 p-5">
+                    <div className="min-w-0">
+                      <p className="label-tech mb-2 text-primary">Product details</p>
+                      <h2 className="truncate font-display text-2xl font-bold">{detailProduct.name.en}</h2>
+                      <p className="mt-1 truncate text-sm text-muted-foreground">{readableProductHandle(detailProduct)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setDetailProduct(null)}
+                      className="admin-ghost inline-flex h-10 w-10 shrink-0 items-center justify-center text-muted-foreground"
+                      aria-label="Close product details"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 space-y-5 overflow-auto p-5">
+                    <div className="flex items-center gap-4">
+                      <ProductThumb src={detailProduct.normalizedImageUrl || detailProduct.image} alt={detailProduct.name.en} size="list" />
+                      <div className="grid flex-1 grid-cols-3 gap-2">
+                        {[
+                          ["Quality", `${quality.score}%`],
+                          ["Issues", issueLabels.length],
+                          ["Images", imageCount],
+                        ].map(([label, value]) => (
+                          <div key={label} className="rounded-md border border-border/30 bg-surface-lowest/45 px-3 py-2">
+                            <p className="text-[9px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</p>
+                            <p className="mt-1 font-display text-lg font-semibold tabular-nums text-foreground">{value}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <section className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-sm font-semibold">Missing and review signals</h3>
+                        <span
+                          className={cn(
+                            "rounded-sm border px-2 py-1 text-[10px] font-mono uppercase tracking-widest",
+                            quality.needsReview
+                              ? "border-amber-400/35 bg-amber-500/10 text-amber-200"
+                              : "border-emerald-400/35 bg-emerald-500/10 text-emerald-200",
+                          )}
+                        >
+                          {quality.needsReview ? "review" : "ready"}
+                        </span>
+                      </div>
+                      {issueLabels.length ? (
+                        <div className="flex flex-wrap gap-2">
+                          {issueLabels.map((item) => (
+                            <span
+                              key={item}
+                              className="rounded-sm border border-border/35 bg-surface-lowest px-2 py-1 text-[11px] text-muted-foreground"
+                            >
+                              {item}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">No missing fields detected.</p>
+                      )}
+                    </section>
+
+                    <section className="grid gap-3 sm:grid-cols-2">
+                      {[
+                        ["Brand", detailProduct.brand || "Missing"],
+                        ["Category", getAdminCategoryLabel(detailProduct) || "Missing"],
+                        [
+                          "Subcategories",
+                          detailProduct.subCategories?.length
+                            ? detailProduct.subCategories.map((item) => toDisplayLabel(item)).join(", ")
+                            : "Missing",
+                        ],
+                        ["Availability", getAdminAvailabilityLabel(detailProduct)],
+                        ["Stock", typeof detailProduct.stock === "number" ? `${detailProduct.stock}` : "Not set"],
+                        ["Status", formatAdminStatusLabel(detailProduct.status)],
+                        ["Badge", detailProduct.badge || "None"],
+                        ["Specs", `${specCount} completed`],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-md border border-border/30 bg-surface-lowest/35 px-3 py-2">
+                          <p className="text-[9px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</p>
+                          <p className="mt-1 break-words text-sm text-foreground">{value}</p>
+                        </div>
+                      ))}
+                    </section>
+
+                    {assignment ? (
+                      <section className="rounded-md border border-border/30 bg-surface-lowest/35 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-semibold">Classification</h3>
+                          <span
+                            className={cn(
+                              "rounded-sm border px-2 py-1 text-[10px] font-mono uppercase tracking-widest",
+                              assignment.needsReview
+                                ? "border-amber-400/35 bg-amber-500/10 text-amber-200"
+                                : "border-emerald-400/35 bg-emerald-500/10 text-emerald-200",
+                            )}
+                          >
+                            {Math.round(assignment.confidenceScore * 100)}%
+                          </span>
+                        </div>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          {assignment.classificationReason || "No classification note."}
+                        </p>
+                      </section>
+                    ) : null}
+
+                    <section className="space-y-2">
+                      <h3 className="text-sm font-semibold">SEO</h3>
+                      {seoItems.map(([label, value]) => (
+                        <div key={label} className="rounded-md border border-border/30 bg-surface-lowest/35 px-3 py-2">
+                          <p className="text-[9px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</p>
+                          <p className="mt-1 break-words text-sm text-foreground">{value}</p>
+                        </div>
+                      ))}
+                    </section>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/30 p-4">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const product = detailProduct;
+                        setDetailProduct(null);
+                        openEdit(product);
+                      }}
+                      className="admin-ghost inline-flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground"
+                    >
+                      Fix SEO
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const product = detailProduct;
+                        setDetailProduct(null);
+                        openEdit(product);
+                      }}
+                      className="admin-ghost inline-flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground"
+                    >
+                      Add specs
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const product = detailProduct;
+                        setDetailProduct(null);
+                        openEdit(product);
+                      }}
+                      className="admin-cta inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest"
+                    >
+                      <Edit2 className="h-3.5 w-3.5" />
+                      Edit product
+                    </button>
+                  </div>
+                </aside>
+              </div>
+            );
+          })()
+        : null}
 
       {classificationPreviewOpen && classificationPreview && (
         <div className="fixed inset-0 z-[76] flex items-center justify-center bg-background/82 p-3 backdrop-blur-xl md:p-6">
@@ -2598,13 +3726,28 @@ const AdminProducts = () => {
                   Add the source, product story, pricing, media, and specialist audio specs in one controlled flow.
                 </p>
               </div>
-              <button
-                onClick={() => setFormOpen(false)}
-                className="admin-ghost inline-flex h-10 w-10 shrink-0 items-center justify-center text-muted-foreground"
-                aria-label="Close"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <div className="flex shrink-0 items-start gap-3">
+                <div
+                  className={cn(
+                    "hidden max-w-[260px] rounded-md border px-3 py-2 text-xs md:block",
+                    formQualityTone === "good" && "border-emerald-400/35 bg-emerald-500/10 text-emerald-200",
+                    formQualityTone === "warn" && "border-amber-400/35 bg-amber-500/10 text-amber-200",
+                    formQualityTone === "bad" && "border-red-400/30 bg-red-500/10 text-red-200",
+                  )}
+                >
+                  <p className="font-mono text-[10px] uppercase tracking-[0.16em]">Product Quality {formQuality.score}%</p>
+                  <p className="mt-1 truncate text-muted-foreground">
+                    {formQuality.missing.length ? `Missing: ${formQuality.missing.slice(0, 3).join(", ")}` : "Ready for storefront"}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setFormOpen(false)}
+                  className="admin-ghost inline-flex h-10 w-10 shrink-0 items-center justify-center text-muted-foreground"
+                  aria-label="Close"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
             <form onSubmit={submitForm} className="flex-1 overflow-y-auto px-4 py-5 md:px-6 md:py-6">
@@ -2645,12 +3788,50 @@ const AdminProducts = () => {
                       required
                       listId="admin-category-options"
                     />
-                    <Field
-                      label="Sub-categories"
-                      value={form.subCategoriesText}
-                      onChange={(value) => setForm((current) => ({ ...current, subCategoriesText: value }))}
-                      placeholder="iems, studio, portable"
-                    />
+                    <div className="xl:col-span-1">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="label-tech block">Sub-categories</span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {parseCsv(form.subCategoriesText).length} selected
+                        </span>
+                      </div>
+                      <div className="admin-field min-h-[52px] space-y-3 px-3 py-3">
+                        <div className="flex max-h-32 flex-wrap gap-2 overflow-y-auto pr-1">
+                          {formSubcategoryOptions.map((option) => {
+                            const selected = parseCsv(form.subCategoriesText).some(
+                              (term) => sameAdminKey(term) === sameAdminKey(option.value),
+                            );
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => toggleFormSubcategory(option.value)}
+                                className={cn(
+                                  "inline-flex items-center gap-2 rounded-sm border px-2.5 py-1.5 text-[11px] transition-colors",
+                                  selected
+                                    ? "border-primary/45 bg-primary/15 text-primary"
+                                    : "border-border/35 bg-background/30 text-muted-foreground hover:border-primary/30 hover:text-foreground",
+                                )}
+                              >
+                                <span
+                                  className={cn(
+                                    "h-1.5 w-1.5 rounded-full",
+                                    selected ? "bg-primary" : "bg-muted-foreground/45",
+                                  )}
+                                />
+                                {option.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <input
+                          value={form.subCategoriesText}
+                          onChange={(event) => setForm((current) => ({ ...current, subCategoriesText: event.target.value }))}
+                          placeholder="closed-back, portable"
+                          className="w-full border-t border-border/25 bg-transparent pt-2 text-xs text-muted-foreground outline-none placeholder:text-muted-foreground/55"
+                        />
+                      </div>
+                    </div>
                     <Field
                       label="Tagline (EN)"
                       value={form.taglineEn}
@@ -2667,35 +3848,58 @@ const AdminProducts = () => {
 
                 <FormSection
                   title="Pricing and availability"
-                  description="Sale price, compare-at price, badge, and inventory state."
+                  description="Regular price, discount price, badge, and inventory state."
                   icon={<ListFilter className="h-4 w-4" />}
                 >
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    <NumericField
-                      label="Current price (IQD)"
-                      value={form.price}
-                      onChange={(value) => setForm((current) => ({ ...current, price: value }))}
-                      onBlur={applyNinePricingToForm}
-                      helperText="Auto-applies 9 pricing: 75,000 → 79,000."
-                      required
-                    />
-                    <NumericField
-                      label="Current price (USD)"
-                      value={form.priceUsd}
-                      onChange={(value) => setForm((current) => ({ ...current, priceUsd: value }))}
-                      allowDecimal
-                    />
-                    <NumericField
-                      label="Official price (IQD)"
-                      value={form.officialPrice}
-                      onChange={(value) => setForm((current) => ({ ...current, officialPrice: value }))}
-                    />
-                    <NumericField
-                      label="Official price (USD)"
-                      value={form.officialPriceUsd}
-                      onChange={(value) => setForm((current) => ({ ...current, officialPriceUsd: value }))}
-                      allowDecimal
-                    />
+                  <div className="grid gap-4">
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="rounded-md border border-border/30 bg-surface-lowest/35 p-4">
+                        <div className="mb-4">
+                          <p className="label-tech text-primary">Price / السعر</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Regular or official price before any discount.
+                          </p>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <NumericField
+                            label="Price (IQD) / السعر بالدينار"
+                            value={form.officialPrice}
+                            onChange={(value) => setForm((current) => ({ ...current, officialPrice: value }))}
+                          />
+                          <NumericField
+                            label="Price (USD) / السعر بالدولار"
+                            value={form.officialPriceUsd}
+                            onChange={(value) => setForm((current) => ({ ...current, officialPriceUsd: value }))}
+                            allowDecimal
+                          />
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-primary/20 bg-primary/5 p-4">
+                        <div className="mb-4">
+                          <p className="label-tech text-primary">Discount price / سعر الخصم</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Storefront selling price. It is used for checkout and product cards.
+                          </p>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <NumericField
+                            label="Discount (IQD) / الخصم بالدينار"
+                            value={form.price}
+                            onChange={(value) => setForm((current) => ({ ...current, price: value }))}
+                            onBlur={applyNinePricingToForm}
+                            helperText="Auto-applies 9 pricing: 75,000 → 79,000."
+                            required
+                          />
+                          <NumericField
+                            label="Discount (USD) / الخصم بالدولار"
+                            value={form.priceUsd}
+                            onChange={(value) => setForm((current) => ({ ...current, priceUsd: value }))}
+                            allowDecimal
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                     <label className="block">
                       <span className="label-tech mb-2 block">Badge</span>
                       <select
@@ -2739,6 +3943,111 @@ const AdminProducts = () => {
                         </p>
                       </div>
                     </label>
+                    </div>
+                  </div>
+                </FormSection>
+
+                <FormSection
+                  title="Web enrichment preview"
+                  description="Find and review real product description media, specs, and box contents before publishing them."
+                  icon={<Sparkles className="h-4 w-4" />}
+                >
+                  <div className="space-y-4">
+                    <div className="rounded-md border border-border/30 bg-surface-lowest/35 px-4 py-3 text-sm text-muted-foreground">
+                      Select products first. Dry-run never changes price, stock, category, main image, or gallery. Safe apply requires confidence &gt;= 90% and a reliable product match.
+                    </div>
+                    <div className="grid gap-3 xl:grid-cols-[0.9fr,1.2fr]">
+                      <label className="block">
+                        <span className="label-tech mb-2 block">Optional source URL</span>
+                        <input
+                          value={enrichmentSourceUrl}
+                          onChange={(event) => setEnrichmentSourceUrl(event.target.value)}
+                          placeholder="https://www.linsoul.com/products/..."
+                          className="admin-field w-full px-4 py-3 text-sm"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="label-tech mb-2 block">Optional source HTML</span>
+                        <textarea
+                          value={enrichmentSourceHtml}
+                          onChange={(event) => setEnrichmentSourceHtml(event.target.value)}
+                          placeholder="Paste product description HTML for a selected product preview"
+                          className="admin-field min-h-24 w-full px-4 py-3 font-mono text-xs"
+                        />
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void runWebEnrichmentDryRun()}
+                        disabled={enrichmentLoading || !selectedIds.size}
+                        className="admin-ghost inline-flex items-center gap-2 px-4 py-3 text-[11px] font-semibold uppercase tracking-widest text-primary disabled:opacity-60"
+                        title={!selectedIds.size ? "Select products before running enrichment" : "Dry-run selected products"}
+                      >
+                        {enrichmentLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListFilter className="h-3.5 w-3.5" />}
+                        Dry-run selected
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void applyWebEnrichmentSafeRows()}
+                        disabled={enrichmentApplying || !enrichmentReport?.summary.products_safe_to_enrich}
+                        className="admin-primary inline-flex items-center gap-2 px-4 py-3 text-[11px] font-semibold uppercase tracking-widest disabled:opacity-60"
+                      >
+                        {enrichmentApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckSquare className="h-3.5 w-3.5" />}
+                        Apply safe preview
+                      </button>
+                    </div>
+
+                    {enrichmentReport ? (
+                      <div className="space-y-4">
+                        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                          {[
+                            ["Checked", enrichmentReport.summary.total_products_checked],
+                            ["Sources", enrichmentReport.summary.products_with_sources_found],
+                            ["Safe", enrichmentReport.summary.products_safe_to_enrich],
+                            ["Review", enrichmentReport.summary.products_needing_review],
+                            ["Desc media", enrichmentReport.summary.description_images_found],
+                            ["Specs", enrichmentReport.summary.spec_images_found],
+                          ].map(([label, value]) => (
+                            <div key={label} className="rounded-md border border-border/30 bg-surface-lowest/45 px-4 py-3">
+                              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{label}</p>
+                              <p className="mt-2 font-mono text-xl font-bold text-foreground">{value}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="overflow-hidden rounded-md border border-border/30">
+                          <div className="grid grid-cols-[1.5fr_1fr_0.8fr_0.8fr_1.2fr] gap-3 border-b border-border/30 bg-surface-lowest/60 px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                            <span>Product</span>
+                            <span>Source</span>
+                            <span>Confidence</span>
+                            <span>Blocks</span>
+                            <span>Status</span>
+                          </div>
+                          {(enrichmentReport.preview || enrichmentReport.items || []).slice(0, 10).map((row) => (
+                            <div
+                              key={`${row.product_id}-${row.source_url || row.match_type}`}
+                              className="grid grid-cols-[1.5fr_1fr_0.8fr_0.8fr_1.2fr] gap-3 border-b border-border/20 px-4 py-3 text-sm last:border-b-0"
+                            >
+                              <div className="min-w-0">
+                                <p className="truncate font-medium text-foreground">{row.product_title}</p>
+                                <p className="mt-1 truncate text-xs text-muted-foreground">{row.match_type.replaceAll("_", " ")}</p>
+                              </div>
+                              <span className="truncate text-xs text-muted-foreground">{row.source_url || row.matched_source || "no source"}</span>
+                              <span className="font-mono text-xs text-muted-foreground">{Math.round((row.match_confidence || 0) * 100)}%</span>
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {row.proposed_blocks_count} / {row.proposed_description_images_count} img
+                              </span>
+                              <span className={cn("text-xs", row.recommended_action === "apply_safe" ? "text-emerald-200" : "text-amber-100")}>
+                                {row.recommended_action === "apply_safe"
+                                  ? `safe · ${row.proposed_spec_images_count} specs · ${row.proposed_box_contents_count + (row.proposed_box_images_count || 0)} box`
+                                  : row.warnings.slice(0, 2).join(", ") || "needs review"}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </FormSection>
 
@@ -2773,10 +4082,10 @@ const AdminProducts = () => {
                           </div>
                         </label>
                         <p className="text-xs text-muted-foreground">
-                          Paste a product page URL or type the exact model name. We search for the closest real product page, classify it, collect media, and fill the draft automatically.
+                          Paste a product page URL or type the exact model name. We search for the closest real product page, classify it, collect media, and prepare a Research Draft for review.
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          Search now prefers exact model matches, avoids review and promo pages when a store page exists, and removes duplicate media before it reaches the gallery.
+                          Search now prefers exact model matches, avoids review and promo pages when a store page exists, and keeps duplicate media out of the final gallery until you approve it.
                         </p>
                         {importMeta ? (
                           <div className="rounded-md border border-border/30 bg-surface-lowest/45 px-4 py-3 text-sm">
@@ -3048,7 +4357,7 @@ const AdminProducts = () => {
                             <div>
                               <p className="label-tech mb-1 block">Search matches</p>
                               <p className="text-xs text-muted-foreground">
-                                We checked several pages. The best match is applied automatically, and you can switch to another result any time.
+                                We checked several pages. Choose a result to rebuild the Research Draft; nothing is applied until you approve it.
                               </p>
                             </div>
                             <div className="grid gap-3 md:grid-cols-2">
@@ -3058,13 +4367,19 @@ const AdminProducts = () => {
                                 <button
                                   key={`${candidate.url}-${candidate.score}`}
                                   type="button"
-                                  onClick={() => applyImportedDraft(candidate.draft)}
+                                  onClick={() =>
+                                    prepareResearchDraft(candidate.draft, {
+                                      sourceInput: form.sourceUrl.trim() || candidate.url,
+                                      candidates: importCandidates,
+                                      existingProduct: existingImportMatch,
+                                    })
+                                  }
                                   className={cn(
-                                    "flex items-start gap-3 rounded-md border bg-surface-high/30 p-3 text-left transition-colors duration-500 hover:bg-surface-high/50",
+                                    "flex items-start gap-3 rounded-md border bg-surface-high/30 p-3 text-left transition-colors duration-200 hover:bg-surface-high/50",
                                     active ? "border-primary/60 bg-primary/5" : "border-border/30 hover:border-primary/40",
                                   )}
                                 >
-                                  <div className="h-16 w-16 shrink-0 overflow-hidden rounded-md border border-border/30 bg-background">
+                                  <div className="product-image-canvas h-16 w-16 shrink-0 overflow-hidden">
                                     {candidate.image ? (
                                       <img
                                         src={resolveMediaUrl(candidate.image)}
@@ -3090,7 +4405,7 @@ const AdminProducts = () => {
                                     <p className="mt-2 text-xs text-muted-foreground">
                                       {candidate.imageCount} images, {candidate.specCount} specs
                                     </p>
-                                    <p className="mt-1 text-xs text-primary">{active ? "Current draft" : "Switch to this result"}</p>
+                                    <p className="mt-1 text-xs text-primary">{active ? "Current research draft" : "Review this result"}</p>
                                   </div>
                                 </button>
                                 );
@@ -3139,10 +4454,10 @@ const AdminProducts = () => {
                           </button>
                         </div>
                         <p className="mt-2 text-xs text-muted-foreground">
-                          Add links directly, or use Store to copy remote image URLs into EDIO media so the product no longer depends on the source site.
+                          Add links directly, or use Store to copy remote image URLs into edio media so the product no longer depends on the source site.
                         </p>
                       </label>
-                      <label className="block rounded-md border border-dashed border-border/40 bg-surface-lowest/45 px-4 py-4 transition-colors duration-500 hover:border-primary/50">
+                      <label className="block rounded-md border border-dashed border-border/40 bg-surface-lowest/45 px-4 py-4 transition-colors duration-200 hover:border-primary/50">
                         <span className="flex items-center justify-between gap-3">
                           <span>
                             <span className="label-tech mb-1 block">Upload product images</span>
@@ -3224,7 +4539,7 @@ const AdminProducts = () => {
                                     isDragging ? "scale-[0.98] opacity-45" : "hover:border-primary/40",
                                   )}
                                 >
-                                  <div className="relative aspect-square overflow-hidden bg-surface-high">
+                                  <div className="product-image-canvas relative aspect-square overflow-hidden">
                                     <div className="absolute start-2 top-2 z-10 inline-flex h-8 w-8 cursor-grab items-center justify-center rounded-full border border-white/15 bg-black/55 text-white/80 opacity-80 transition group-hover:bg-black/75 group-hover:text-white active:cursor-grabbing">
                                       <GripVertical className="h-4 w-4" />
                                     </div>
@@ -3263,6 +4578,177 @@ const AdminProducts = () => {
                           The selected cover image is outside the gallery. It will still be saved as cover unless you replace it.
                         </div>
                       ) : null}
+                      <div className="space-y-4 rounded-md border border-border/30 bg-surface-lowest/45 p-4">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                          <div>
+                            <p className="label-tech block">Product description content</p>
+                            <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+                              أضف نصوصاً أو صور وصف/مواصفات منفصلة عن معرض المنتج. اسحب البلوكات لتغيير الترتيب، أو استخدم الأسهم.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={addDescriptionTextBlock}
+                              className="press inline-flex items-center gap-2 rounded-full border border-border/40 px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:border-primary/60 hover:text-primary"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              Add text
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => addDescriptionImageBlock()}
+                              className="press inline-flex items-center gap-2 rounded-full border border-border/40 px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:border-primary/60 hover:text-primary"
+                            >
+                              <ImageIcon className="h-3.5 w-3.5" />
+                              Add image
+                            </button>
+                            <label
+                              className={cn(
+                                "press inline-flex cursor-pointer items-center gap-2 rounded-full border border-primary/35 px-3 py-2 text-xs font-semibold text-primary transition-colors hover:border-primary",
+                                uploadingMedia && "pointer-events-none opacity-60",
+                              )}
+                            >
+                              <Upload className="h-3.5 w-3.5" />
+                              {uploadingMedia ? "Uploading..." : "Upload"}
+                              <input
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                className="sr-only"
+                                disabled={uploadingMedia}
+                                onChange={(event) => {
+                                  if (event.target.files?.length) void uploadDescriptionMedia(event.target.files);
+                                  event.currentTarget.value = "";
+                                }}
+                              />
+                            </label>
+                          </div>
+                        </div>
+                        <div
+                          className="rounded-lg border border-dashed border-border/35 bg-background/25 p-4 text-center transition-colors hover:border-primary/45"
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            const files = event.dataTransfer.files;
+                            const url = event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain");
+                            if (files?.length) {
+                              void uploadDescriptionMedia(files);
+                            } else if (url && /^https?:\/\//i.test(url.trim())) {
+                              addDescriptionImageBlock(url.trim(), "description");
+                            }
+                          }}
+                        >
+                          <Upload className="mx-auto mb-2 h-5 w-5 text-primary" />
+                          <p className="text-sm font-medium text-foreground">Drag images here</p>
+                          <p className="mt-1 text-xs text-muted-foreground">أو اسحب رابط صورة من المتصفح. سيتم إضافتها كوصف بصري وليس كمعرض.</p>
+                        </div>
+                        {galleryItems.length ? (
+                          <div className="space-y-2">
+                            <p className="label-tech text-[10px]">Use existing gallery image</p>
+                            <div className="flex gap-2 overflow-x-auto pb-1">
+                              {galleryItems.map((item) => {
+                                const resolved = resolveMediaUrl(item);
+                                return (
+                                  <button
+                                    key={normalizeMediaKey(item)}
+                                    type="button"
+                                    onClick={() => addDescriptionBlockFromGallery(item)}
+                                    className="group h-16 w-16 shrink-0 overflow-hidden rounded-md border border-border/30 bg-white transition-colors hover:border-primary"
+                                    title="Add this gallery image to description"
+                                  >
+                                    <img src={resolved} alt="Gallery option" className="h-full w-full object-contain p-1 transition-transform group-hover:scale-105" />
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+                        {descriptionBlockItems.length ? (
+                          <div className="space-y-3">
+                            {descriptionBlockItems.map((block, index) => {
+                              const resolved = resolveMediaUrl(block.media?.url || "");
+                              const blockKey = block.id || `${block.type}-${index}`;
+                              const blockText = block.content?.text || block.content?.html_or_markdown || "";
+                              const role = block.media?.role || block.content?.imageRole || (block.type === "spec_image" ? "spec_image" : "description");
+                              return (
+                                <div
+                                  key={blockKey}
+                                  draggable
+                                  onDragStart={() => setDraggedDescriptionBlockId(blockKey)}
+                                  onDragOver={(event) => event.preventDefault()}
+                                  onDrop={(event) => {
+                                    event.preventDefault();
+                                    const fromIndex = descriptionBlockItems.findIndex((item, itemIndex) => (item.id || `${item.type}-${itemIndex}`) === draggedDescriptionBlockId);
+                                    moveDescriptionBlock(fromIndex, index);
+                                    setDraggedDescriptionBlockId(null);
+                                  }}
+                                  onDragEnd={() => setDraggedDescriptionBlockId(null)}
+                                  className="rounded-md border border-border/30 bg-background/45 p-3"
+                                >
+                                  <div className="mb-3 flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2">
+                                      <GripVertical className="h-4 w-4 cursor-grab text-muted-foreground" />
+                                      <span className="label-tech text-[10px]">Block {index + 1}</span>
+                                    </div>
+                                    <div className="flex gap-1">
+                                      <button type="button" onClick={() => moveDescriptionBlock(index, Math.max(0, index - 1))} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border/30 text-muted-foreground transition-colors hover:border-primary hover:text-primary" aria-label="Move description block up">↑</button>
+                                      <button type="button" onClick={() => moveDescriptionBlock(index, Math.min(descriptionBlockItems.length - 1, index + 1))} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border/30 text-muted-foreground transition-colors hover:border-primary hover:text-primary" aria-label="Move description block down">↓</button>
+                                      <button type="button" onClick={() => removeDescriptionBlock(index)} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-red-400/35 text-red-200 transition-colors hover:bg-red-500 hover:text-white" aria-label="Remove description block">
+                                        <X className="h-4 w-4" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                  {block.type === "text" ? (
+                                    <TextAreaField label="Text" value={blockText} rows={3} onChange={(value) => patchDescriptionBlock(index, { type: "text", content: { text: value } })} placeholder="Write a short description paragraph..." />
+                                  ) : (
+                                    <div className="grid gap-3 lg:grid-cols-[180px_minmax(0,1fr)]">
+                                      <div className="product-image-canvas aspect-video overflow-hidden">
+                                        {resolved ? (
+                                          <img src={resolved} alt={block.altText || block.media?.alt || "Description media"} className="h-full w-full object-contain p-2" />
+                                        ) : (
+                                          <div className="flex h-full items-center justify-center text-muted-foreground">
+                                            <ImageIcon className="h-6 w-6" />
+                                          </div>
+                                        )}
+                                      </div>
+                                      <div className="grid gap-3 md:grid-cols-2">
+                                        <label className="block">
+                                          <span className="label-tech mb-2 block">Type</span>
+                                          <select
+                                            value={role}
+                                            onChange={(event) => {
+                                              const nextRole = normalizeDescriptionRole(event.target.value) || "description";
+                                              patchDescriptionBlock(index, {
+                                                media: { ...(block.media || { url: "" }), role: nextRole },
+                                                content: { ...(block.content || {}), imageRole: nextRole },
+                                              });
+                                            }}
+                                            className="admin-field w-full px-4 py-3 text-sm"
+                                          >
+                                            <option value="description">Description image</option>
+                                            <option value="feature">Feature image</option>
+                                            <option value="spec_image">Spec image</option>
+                                            <option value="comparison">Comparison</option>
+                                            <option value="diagram">Diagram</option>
+                                          </select>
+                                        </label>
+                                        <Field label="Image URL" value={block.media?.url || ""} dir="ltr" onChange={(value) => patchDescriptionBlock(index, { media: { ...(block.media || { url: "" }), url: value } })} placeholder="https://..." />
+                                        <Field label="Alt text" value={block.altText || block.media?.alt || ""} onChange={(value) => patchDescriptionBlock(index, { altText: value, media: { ...(block.media || { url: "" }), alt: value } })} placeholder="Short useful image description" />
+                                        <Field label="Caption" value={block.caption || ""} onChange={(value) => patchDescriptionBlock(index, { caption: value })} placeholder="Optional caption" />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="rounded-sm border border-border/20 bg-background/35 px-3 py-2 text-xs text-muted-foreground">
+                            No visual description blocks yet. Existing text description will still render normally.
+                          </p>
+                        )}
+                      </div>
                     </div>
                       <div className="admin-bezel">
                       <div className="admin-core p-4">
@@ -3272,7 +4758,7 @@ const AdminProducts = () => {
                           {galleryItems.length ? `${galleryItems.length} gallery image${galleryItems.length > 1 ? "s" : ""}` : "No gallery yet"}
                         </p>
                       </div>
-                      <div className="mt-3 aspect-square overflow-hidden rounded-md border border-border/30 bg-surface-high">
+                      <div className="product-image-canvas mt-3 aspect-square overflow-hidden">
                         {coverPreview ? (
                           <img src={coverPreview} alt="Product preview" className="h-full w-full object-contain p-4" />
                         ) : (
@@ -3293,7 +4779,7 @@ const AdminProducts = () => {
                                 key={`preview-${normalizeMediaKey(item) || item}`}
                                 type="button"
                                 onClick={() => setForm((current) => ({ ...current, image: item }))}
-                                className="aspect-square overflow-hidden rounded-md border border-border/30 bg-surface-high transition-colors hover:border-primary/50"
+                                className="product-image-canvas aspect-square overflow-hidden transition-opacity hover:opacity-85"
                               >
                                 <img src={resolveMediaUrl(item)} alt="Gallery preview" className="h-full w-full object-contain p-2" />
                               </button>
@@ -3344,6 +4830,396 @@ const AdminProducts = () => {
                           ))}
                         </div>
                       </div>
+                      </div>
+                    </div>
+                  </div>
+                </FormSection>
+
+                <FormSection
+                  title="Product Page Builder"
+                  description="Build Description, Sound, Specs, SEO, media, sources, and live preview from one structured draft."
+                  icon={<Eye className="h-4 w-4" />}
+                >
+                  <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.72fr)]">
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap gap-2">
+                        {(["basic", "media", "description", "sound", "specs", "seo", "sources", "preview", "ai_import"] as ProductPageBuilderTab[]).map((tab) => (
+                          <button
+                            key={tab}
+                            type="button"
+                            onClick={() => setProductPageBuilderTab(tab)}
+                            className={cn(
+                              "rounded-full border px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors",
+                              productPageBuilderTab === tab
+                                ? "border-primary/55 bg-primary/15 text-primary"
+                                : "border-border/35 bg-background/30 text-muted-foreground hover:text-foreground",
+                            )}
+                          >
+                            {tab.replace("_", " ")}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-4">
+                        <div className="rounded-md border border-border/30 bg-surface-lowest/45 p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Score</p>
+                          <p className="mt-2 font-mono text-2xl font-bold text-foreground">{productPageValidation.score}%</p>
+                        </div>
+                        <div className="rounded-md border border-border/30 bg-surface-lowest/45 p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Blocks</p>
+                          <p className="mt-2 font-mono text-2xl font-bold text-foreground">{productPageBlocks.length}</p>
+                        </div>
+                        <div className="rounded-md border border-border/30 bg-surface-lowest/45 p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Media</p>
+                          <p className="mt-2 font-mono text-2xl font-bold text-foreground">{productPageMediaItems.length}</p>
+                        </div>
+                        <div className="rounded-md border border-border/30 bg-surface-lowest/45 p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Sources</p>
+                          <p className="mt-2 font-mono text-2xl font-bold text-foreground">{productPageSourceItems.length}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" onClick={generateProductPageDraftFromForm} className="admin-cta inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest">
+                          <Sparkles className="h-3.5 w-3.5" />
+                          Generate Draft
+                        </button>
+                        <button type="button" onClick={validateProductPageDraft} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-primary">
+                          <CheckSquare className="h-3.5 w-3.5" />
+                          Validate
+                        </button>
+                        <button type="button" onClick={runProductResearchDryRun} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+                          <Search className="h-3.5 w-3.5" />
+                          Research Dry-run
+                        </button>
+                      </div>
+
+                      {productPageBuilderTab === "basic" ? (
+                        <BuilderPanel title="Basic draft" note="Identity, pricing, and product matching stay editable in the main form. This panel summarizes the draft before it reaches media and content tabs.">
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <PreviewKeyValue label="Product" value={form.nameEn || pendingImportedDraft?.nameEn} />
+                            <PreviewKeyValue label="Brand" value={form.brand || pendingImportedDraft?.brand} />
+                            <PreviewKeyValue label="Category" value={form.category || pendingImportedDraft?.category} />
+                            <PreviewKeyValue label="Source" value={form.sourceUrl || pendingImportedDraft?.sourceUrl} />
+                          </div>
+                          {researchDraft?.productDuplicate ? (
+                            <p className="mt-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                              Existing product candidate: {researchDraft.productDuplicate.name} ({researchDraft.productDuplicate.reason}).
+                            </p>
+                          ) : null}
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "ai_import" ? (
+                        <BuilderPanel title="AI Import research draft" note="Research Product creates a review draft only. Apply selected to Draft is the first point where imported data touches the editable product form.">
+                          <div className="space-y-4">
+                            <div className="flex flex-wrap gap-2">
+                              <button type="button" onClick={() => void importFromSource()} disabled={importing || !trimmedImportSource} className="admin-cta inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest disabled:opacity-60">
+                                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                                Research Product
+                              </button>
+                              <button type="button" onClick={runProductResearchDryRun} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+                                <ListFilter className="h-3.5 w-3.5" />
+                                Dry Run
+                              </button>
+                              <button type="button" onClick={applyPendingResearchDraft} disabled={!researchDraft || researchValidation.errors.length > 0} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-primary disabled:opacity-60">
+                                <CheckSquare className="h-3.5 w-3.5" />
+                                Apply selected to Draft
+                              </button>
+                              <button type="button" onClick={() => setResearchDraft((current) => current ? { ...current, duplicateImages: [] } : current)} disabled={!researchDraft?.duplicateImages.length} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground disabled:opacity-60">
+                                <Trash2 className="h-3.5 w-3.5" />
+                                Clear duplicate candidates
+                              </button>
+                              <button type="button" onClick={() => toast({ title: researchValidation.errors.length ? "Research draft blocked" : "Research draft validation finished", description: `${researchValidation.errors.length} error(s), ${researchValidation.warnings.length} warning(s), score ${researchValidation.score}%.` })} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-primary">
+                                <ShieldCheck className="h-3.5 w-3.5" />
+                                Validate
+                              </button>
+                              <button type="submit" disabled={submitting || Boolean(researchDraft && researchValidation.errors.length)} className="admin-ghost inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground disabled:opacity-60">
+                                <Check className="h-3.5 w-3.5" />
+                                Save Draft
+                              </button>
+                              <button type="submit" disabled={submitting || Boolean(researchDraft && researchValidation.errors.length)} className="admin-primary inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest disabled:opacity-60">
+                                <CheckSquare className="h-3.5 w-3.5" />
+                                Publish/Update
+                              </button>
+                            </div>
+
+                            {researchDraft ? (
+                              <div className="space-y-4">
+                                <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                                  {[
+                                    ["Sources", researchDraft.sources.length],
+                                    ["Images", researchDraft.images.length],
+                                    ["Image dupes", researchDraft.duplicateImages.length],
+                                    ["Specs", researchDraft.specs.length],
+                                    ["Conflicts", researchDraft.specConflicts.length],
+                                    ["Score", `${researchValidation.score}%`],
+                                  ].map(([label, value]) => (
+                                    <div key={label} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{label}</p>
+                                      <p className="mt-2 font-mono text-xl font-bold text-foreground">{value}</p>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                <div className="grid gap-4 xl:grid-cols-2">
+                                  <div className="space-y-2">
+                                    <p className="label-tech">Source confidence</p>
+                                    {researchDraft.sources.slice(0, 6).map((source) => (
+                                      <div key={source.id || source.url} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                        <div className="flex items-center justify-between gap-3">
+                                          <p className="truncate text-sm font-semibold text-foreground">{source.title || source.url}</p>
+                                          <span className={cn("rounded-sm border px-2 py-1 text-[10px] uppercase tracking-widest", source.confidence === "high" ? "border-emerald-400/35 text-emerald-200" : source.confidence === "medium" ? "border-amber-400/35 text-amber-200" : "border-border/35 text-muted-foreground")}>
+                                            {source.confidence}
+                                          </span>
+                                        </div>
+                                        <p className="mt-1 break-all text-xs text-muted-foreground">{source.url}</p>
+                                        <p className="mt-2 text-[10px] uppercase tracking-[0.16em] text-primary">{source.sourceType}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <p className="label-tech">Image candidates</p>
+                                    <div className="grid grid-cols-2 gap-3">
+                                      {researchDraft.images.slice(0, 6).map((image) => (
+                                        <div key={image.id || image.url} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                          <div className="product-image-canvas aspect-square overflow-hidden bg-white">
+                                            <img src={resolveMediaUrl(image.url)} alt={image.altSuggestion || "Research image candidate"} className="h-full w-full object-contain p-2" loading="lazy" />
+                                          </div>
+                                          <p className="mt-2 truncate text-xs text-foreground">{image.altSuggestion || image.url}</p>
+                                          <p className="mt-1 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{image.licenseStatus || "unknown"} · {image.confidence || "low"}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="grid gap-3 md:grid-cols-2">
+                                  {[...researchValidation.errors, ...researchValidation.warnings].slice(0, 8).map((item, index) => (
+                                    <p key={`${item}-${index}`} className={cn("rounded-sm border px-3 py-2 text-xs", index < researchValidation.errors.length ? "border-red-400/30 bg-red-500/10 text-red-100" : "border-amber-400/25 bg-amber-500/10 text-amber-100")}>
+                                      {item}
+                                    </p>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="rounded-md border border-border/25 bg-background/35 p-3 text-sm text-muted-foreground">
+                                Enter a product URL or exact model name in Media, then run Research Product. No product data is changed until Apply selected to Draft.
+                              </p>
+                            )}
+                          </div>
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "description" ? (
+                        <BuilderPanel title="Description editor" note="Structured blocks support hero editorial, brand story, feature, image + text, full-width image, video, press quote, and FAQ. Edit the JSON until granular controls are connected to storage.">
+                          {productPageBlocks.length ? (
+                            <div className="space-y-2">
+                              {productPageBlocks.map((block) => (
+                                <div key={block.id} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <p className="text-sm font-semibold text-foreground">{block.title || "Untitled block"}</p>
+                                      <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{block.type} · {block.layout}</p>
+                                    </div>
+                                    <span className={cn("rounded-full px-2 py-1 text-[10px]", block.visible ? "bg-primary/15 text-primary" : "bg-red-500/10 text-red-200")}>
+                                      {block.visible ? "Visible" : "Hidden"}
+                                    </span>
+                                  </div>
+                                  {block.body ? <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{block.body}</p> : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="rounded-md border border-border/25 bg-background/35 p-3 text-sm text-muted-foreground">
+                              Generate a draft or paste productPage JSON to start building the Description tab.
+                            </p>
+                          )}
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "sound" ? (
+                        <BuilderPanel title="Sound editor" note="Sound information is shown only when sourced. Empty fields stay admin-only and should not become public claims.">
+                          <div className="grid gap-3 md:grid-cols-2">
+                            {[
+                              ["Signature", productPageDraft?.sound?.signature],
+                              ["Bass", productPageDraft?.sound?.bass],
+                              ["Midrange", productPageDraft?.sound?.mids],
+                              ["Treble", productPageDraft?.sound?.treble],
+                              ["Soundstage", productPageDraft?.sound?.soundstage],
+                              ["Pairing", productPageDraft?.sound?.pairing || productPageDraft?.sound?.dacAmpRequirement],
+                            ].map(([label, value]) => (
+                              <div key={label} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{label}</p>
+                                <p className="mt-2 text-sm text-foreground/80">{value || "Needs research"}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "specs" ? (
+                        <BuilderPanel title="Specs editor" note="Specs are grouped for the public table. Add only confirmed rows and keep source references when possible.">
+                          {productPageSpecGroups.length ? (
+                            <div className="space-y-3">
+                              {productPageSpecGroups.map((group) => (
+                                <div key={group.id} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                  <p className="font-semibold text-foreground">{group.title}</p>
+                                  <div className="mt-2 grid gap-2 md:grid-cols-2">
+                                    {group.specs.slice(0, 8).map((spec) => (
+                                      <p key={`${group.id}-${spec.name}`} className="text-xs text-muted-foreground">
+                                        <span className="text-foreground/85">{spec.name}:</span> {spec.value}{spec.unit ? ` ${spec.unit}` : ""}
+                                      </p>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="rounded-md border border-border/25 bg-background/35 p-3 text-sm text-muted-foreground">No grouped specs yet.</p>
+                          )}
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "media" ? (
+                        <BuilderPanel title="Media manager" note="Every image needs alt text, placement, dimensions, and license status before publishing.">
+                          <div className="grid gap-3 md:grid-cols-2">
+                            {productPageMediaItems.map((media) => (
+                              <div key={media.id} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                <div className="flex gap-3">
+                                  <div className="h-16 w-16 shrink-0 overflow-hidden rounded-sm bg-white">
+                                    <img src={resolveMediaUrl(media.url)} alt={media.alt || "Product media"} className="h-full w-full object-contain p-1" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-semibold text-foreground">{media.alt || "Missing alt"}</p>
+                                    <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{media.placement} · {media.licenseStatus}</p>
+                                    <p className="mt-1 text-xs text-muted-foreground">{media.width && media.height ? `${media.width}x${media.height}` : "Missing dimensions"}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "seo" ? (
+                        <BuilderPanel title="SEO editor" note="SEO fields power the visible metadata and must match the product page content.">
+                          <div className="grid gap-3">
+                            <PreviewKeyValue label="SEO title" value={productPageDraft?.seo?.title} />
+                            <PreviewKeyValue label="Meta description" value={productPageDraft?.seo?.metaDescription} />
+                            <PreviewKeyValue label="Canonical path" value={productPageDraft?.seo?.canonicalPath} />
+                            <PreviewKeyValue label="OG image" value={productPageDraft?.seo?.ogImage} />
+                          </div>
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "sources" ? (
+                        <BuilderPanel title="Sources manager" note="Track manufacturer pages, official manuals, distributors, expert reviews, internal notes, and confidence.">
+                          <div className="space-y-2">
+                            {productPageSourceItems.length ? productPageSourceItems.map((source) => (
+                              <div key={source.id} className="rounded-md border border-border/30 bg-background/35 p-3">
+                                <p className="text-sm font-semibold text-foreground">{source.title || source.url}</p>
+                                <p className="mt-1 break-all text-xs text-muted-foreground">{source.url}</p>
+                                <p className="mt-2 text-[10px] uppercase tracking-[0.16em] text-primary">{source.sourceType} · {source.confidence}</p>
+                              </div>
+                            )) : <p className="rounded-md border border-border/25 bg-background/35 p-3 text-sm text-muted-foreground">No source references yet.</p>}
+                          </div>
+                        </BuilderPanel>
+                      ) : null}
+
+                      {productPageBuilderTab === "preview" ? (
+                        <BuilderPanel title="Preview controls" note="The preview reads only the current draft and never publishes by itself.">
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <label className="block">
+                              <span className="label-tech mb-2 block">Preview tab</span>
+                              <select value={productPagePreviewTab} onChange={(event) => setProductPagePreviewTab(event.target.value as ProductPagePreviewTab)} className="admin-field w-full px-4 py-3 text-sm">
+                                <option value="description">Description</option>
+                                <option value="sound">Sound</option>
+                                <option value="specs">Specs</option>
+                              </select>
+                            </label>
+                            <label className="block">
+                              <span className="label-tech mb-2 block">Device</span>
+                              <select value={productPagePreviewDevice} onChange={(event) => setProductPagePreviewDevice(event.target.value as ProductPagePreviewDevice)} className="admin-field w-full px-4 py-3 text-sm">
+                                <option value="desktop">Desktop preview</option>
+                                <option value="mobile">Mobile preview</option>
+                              </select>
+                            </label>
+                          </div>
+                        </BuilderPanel>
+                      ) : null}
+
+                      <TextAreaField
+                        label="Structured productPage JSON"
+                        value={form.productPageText}
+                        onChange={(value) => setForm((current) => ({ ...current, productPageText: value }))}
+                        rows={12}
+                        placeholder="Generate a draft, then refine structured productPage JSON here."
+                      />
+                    </div>
+
+                    <div className="admin-bezel">
+                      <div className="admin-core sticky top-4 space-y-4 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="label-tech block">Preview Product Page</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {productPagePreviewDevice === "mobile" ? "Mobile width" : "Desktop width"} · {productPagePreviewTab}
+                            </p>
+                          </div>
+                          <span className={cn("rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]", productPageValidation.errors.length ? "bg-red-500/10 text-red-200" : "bg-primary/15 text-primary")}>
+                            {productPageValidation.errors.length ? "Blocked" : "Draft"}
+                          </span>
+                        </div>
+                        <div className={cn("mx-auto overflow-hidden rounded-lg border border-border/30 bg-background", productPagePreviewDevice === "mobile" ? "max-w-[360px]" : "max-w-full")}>
+                          <div className="border-b border-border/25 p-4">
+                            <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-primary">{form.brand || "Brand"}</p>
+                            <h4 className="mt-2 font-display text-xl font-semibold leading-tight">{form.nameEn || "Product name"}</h4>
+                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{productPageDraft?.seo?.metaDescription || form.taglineEn || "Product page draft preview."}</p>
+                          </div>
+                          <div className="p-4">
+                            {productPagePreviewTab === "description" ? (
+                              <div className="space-y-3">
+                                {productPageBlocks.slice(0, 3).map((block) => (
+                                  <div key={block.id} className="rounded-md border border-border/25 bg-surface-lowest/45 p-3">
+                                    <p className="text-sm font-semibold">{block.title || "Description block"}</p>
+                                    <p className="mt-1 line-clamp-3 text-xs leading-relaxed text-muted-foreground">{block.body || block.subtitle || "No body text yet."}</p>
+                                  </div>
+                                ))}
+                                {!productPageBlocks.length ? <p className="text-sm text-muted-foreground">No Description blocks yet.</p> : null}
+                              </div>
+                            ) : null}
+                            {productPagePreviewTab === "sound" ? (
+                              <div className="space-y-2 text-sm text-muted-foreground">
+                                <PreviewKeyValue label="Signature" value={productPageDraft?.sound?.signature} />
+                                <PreviewKeyValue label="Bass" value={productPageDraft?.sound?.bass} />
+                                <PreviewKeyValue label="Mids" value={productPageDraft?.sound?.mids} />
+                                <PreviewKeyValue label="Treble" value={productPageDraft?.sound?.treble} />
+                              </div>
+                            ) : null}
+                            {productPagePreviewTab === "specs" ? (
+                              <div className="space-y-3">
+                                {productPageSpecGroups.map((group) => (
+                                  <div key={group.id} className="rounded-md border border-border/25 bg-surface-lowest/45 p-3">
+                                    <p className="text-sm font-semibold">{group.title}</p>
+                                    {group.specs.slice(0, 5).map((spec) => (
+                                      <p key={`${group.id}-${spec.name}`} className="mt-1 text-xs text-muted-foreground">{spec.name}: {spec.value}{spec.unit ? ` ${spec.unit}` : ""}</p>
+                                    ))}
+                                  </div>
+                                ))}
+                                {!productPageSpecGroups.length ? <p className="text-sm text-muted-foreground">No Specs groups yet.</p> : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          {[...productPageValidation.errors, ...productPageValidation.warnings].slice(0, 8).map((item, index) => (
+                            <p key={`${item}-${index}`} className={cn("rounded-sm border px-3 py-2 text-xs", index < productPageValidation.errors.length ? "border-red-400/30 bg-red-500/10 text-red-100" : "border-amber-400/25 bg-amber-500/10 text-amber-100")}>
+                              {item}
+                            </p>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -3453,9 +5329,9 @@ const AdminProducts = () => {
                             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm">
                               <div className="flex flex-wrap items-start justify-between gap-3">
                                 <div>
-                                  <p className="font-medium text-amber-100">Internal spec rows are hidden from EDIO</p>
+                                  <p className="font-medium text-amber-100">Internal spec rows are hidden from edio</p>
                                   <p className="mt-1 text-xs text-amber-100/80">
-                                    {hiddenSpecRows.map((spec) => spec.labelEn || spec.labelAr).join(" • ")} will not be used. EDIO relies on the slug field instead of SKU.
+                                    {hiddenSpecRows.map((spec) => spec.labelEn || spec.labelAr).join(" • ")} will not be used. edio relies on the slug field instead of SKU.
                                   </p>
                                 </div>
                                 <button
@@ -3494,7 +5370,7 @@ const AdminProducts = () => {
                         <div>
                           <p className="label-tech mb-1 block">Specifications</p>
                           <p className="text-xs text-muted-foreground">
-                            Add only the fields that matter on the product page. Arabic labels are optional, and internal IDs like SKU stay out of this form because EDIO uses the slug field instead.
+                            Add only the fields that matter on the product page. Arabic labels are optional, and internal IDs like SKU stay out of this form because edio uses the slug field instead.
                           </p>
                         </div>
                         <button
@@ -3571,6 +5447,21 @@ const AdminProducts = () => {
                         ))}
                       </div>
                     </div>
+
+                    <TextAreaField
+                      label="Product Relationships"
+                      value={form.relationshipsText}
+                      onChange={(value) => setForm((current) => ({ ...current, relationshipsText: value }))}
+                      rows={7}
+                      placeholder={
+                        '[\n  {\n    "targetProductId": "prd_...",\n    "relationshipType": "accessory",\n    "reason": "2-pin cable that fits this IEM",\n    "priority": 10,\n    "active": true\n  }\n]\n\nOr: accessory | prd_... | reason | 10'
+                      }
+                    />
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      Manual relationships outrank automatic recommendations. Use <code>blocked</code> to prevent a bad match,
+                      or <code>accessory</code>, <code>compatible</code>, <code>similar</code>, <code>alternative</code>, and
+                      <code> same_brand</code> for approved suggestions.
+                    </p>
                   </div>
                 </FormSection>
               </div>
@@ -3599,7 +5490,7 @@ const AdminProducts = () => {
                   disabled={submitting}
                   className="admin-cta group inline-flex items-center gap-3 px-5 py-2.5 text-[11px] font-semibold uppercase tracking-widest disabled:opacity-60"
                 >
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/16 transition-transform duration-500 group-hover:translate-x-0.5 group-hover:-translate-y-0.5">
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/16 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5">
                     <Plus className="h-3.5 w-3.5" />
                   </span>
                   {submitting ? "Saving..." : form.id ? "Save product" : "Create product"}
@@ -3615,10 +5506,14 @@ const AdminProducts = () => {
 };
 
 function resolveMediaUrl(value: string) {
-  if (!value) return "";
-  if (/^(https?:|data:|blob:)/i.test(value)) return value;
-  if (value.startsWith("/")) return `${API_BASE_URL}${value}`;
-  return value;
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^(https?:|data:|blob:)/i.test(raw)) return raw;
+
+  // Imported files live behind the API server. Bundled Vite assets such as
+  // /assets/*.png or /src/assets/*.png must stay on the storefront origin.
+  if (raw.startsWith("/media/imports/")) return `${API_BASE_URL}${raw}`;
+  return raw;
 }
 
 function parseMultiline(value: string) {
@@ -3680,22 +5575,60 @@ function FilterSelect({
   );
 }
 
-function ProductThumb({ src, alt }: { src: string; alt: string }) {
+function ProductThumb({ src, alt, size = "default" }: { src: string; alt: string; size?: "default" | "list" }) {
   const resolvedSrc = resolveMediaUrl(src);
   const [failed, setFailed] = useState(false);
 
+  useEffect(() => {
+    setFailed(false);
+  }, [resolvedSrc]);
+
   return (
-    <div className="product-image-canvas flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border/30">
+    <div
+      className={cn(
+        "product-image-canvas flex shrink-0 items-center justify-center overflow-hidden rounded-md border border-border/35 bg-white",
+        size === "list" ? "h-16 w-16" : "h-14 w-14",
+      )}
+    >
       {resolvedSrc && !failed ? (
         <img
           src={resolvedSrc}
           alt={alt}
-          className="h-full w-full object-contain p-1"
+          className="h-full w-full object-contain p-1.5"
           onError={() => setFailed(true)}
         />
       ) : (
         <ImageIcon className="h-5 w-5 text-muted-foreground" />
       )}
+    </div>
+  );
+}
+
+function BuilderPanel({
+  title,
+  note,
+  children,
+}: {
+  title: string;
+  note: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-border/30 bg-surface-lowest/40 p-4">
+      <div className="mb-4">
+        <p className="font-display text-base font-semibold">{title}</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{note}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function PreviewKeyValue({ label, value }: { label: string; value?: string | number | null }) {
+  return (
+    <div className="rounded-md border border-border/25 bg-background/35 p-3">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{label}</p>
+      <p className="mt-2 break-words text-sm text-foreground/82">{value || "Missing"}</p>
     </div>
   );
 }

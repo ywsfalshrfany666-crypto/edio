@@ -23,7 +23,7 @@ export function sanitizeNumericInput(
 ) {
   const { allowDecimal = false, allowNegative = false } = options;
   let sanitized = normalizeEnglishDigits(value).replace(/,/g, "");
-  sanitized = sanitized.replace(allowDecimal ? /[^0-9.\-]/g : /[^0-9\-]/g, "");
+  sanitized = sanitized.replace(allowDecimal ? /[^0-9.-]/g : /[^0-9-]/g, "");
 
   if (allowNegative) {
     sanitized = sanitized.replace(/(?!^)-/g, "");

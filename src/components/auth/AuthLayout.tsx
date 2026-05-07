@@ -1,6 +1,9 @@
 import { Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Logo } from "@/components/layout/Header";
+import { Seo } from "@/components/Seo";
+import { SUPABASE_AUTH_AVAILABLE } from "@/lib/supabaseConfig";
+import { useAuth } from "@/store/auth";
 import heroImg from "@/assets/hero-headphones.jpg";
 
 type Props = {
@@ -9,11 +12,13 @@ type Props = {
   subtitle?: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  seoTitle?: string;
 };
 
-export function AuthLayout({ eyebrow, title, subtitle, children, footer }: Props) {
+export function AuthLayout({ eyebrow, title, subtitle, children, footer, seoTitle }: Props) {
   return (
     <div className="min-h-screen grid lg:grid-cols-2 bg-background">
+      <Seo title={seoTitle || eyebrow || title} description="Access your edio account." />
       {/* Form side */}
       <div className="flex flex-col px-6 sm:px-10 lg:px-16 py-8">
         <div className="flex items-center justify-between">
@@ -43,7 +48,7 @@ export function AuthLayout({ eyebrow, title, subtitle, children, footer }: Props
         </div>
 
         <p className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground/60">
-          © {new Date().getFullYear()} EDIO Sound Studio
+          © {new Date().getFullYear()} edio Sound Studio
         </p>
       </div>
 
@@ -61,7 +66,7 @@ export function AuthLayout({ eyebrow, title, subtitle, children, footer }: Props
             Track orders, save addresses, and audition first.
           </p>
           <p className="mt-3 text-sm text-muted-foreground max-w-md">
-            Your EDIO account keeps your shipping details, order history, and saved gear in
+            Your edio account keeps your shipping details, order history, and saved gear in
             one place.
           </p>
         </div>
@@ -117,5 +122,84 @@ export function AuthButton({
       ) : null}
       {children}
     </button>
+  );
+}
+
+export function AuthUnavailableNotice({
+  title = "الحسابات غير مفعلة حالياً",
+  message = "الموقع منشور حالياً كنسخة static، لذلك تسجيل الدخول وإنشاء الحساب يحتاجان تفعيل backend قبل أن يعملا بشكل آمن. يمكنك متابعة التسوق أو التواصل معنا لإتمام الطلب.",
+}: {
+  title?: string;
+  message?: string;
+}) {
+  return (
+    <div className="space-y-5 border border-primary/25 bg-primary/10 p-5 text-start">
+      <div>
+        <p className="label-tech mb-2 text-primary">Account access</p>
+        <h2 className="font-display text-2xl font-semibold text-foreground">{title}</h2>
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{message}</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Link
+          to="/shop"
+          className="inline-flex min-h-11 items-center justify-center bg-primary px-4 py-3 text-[11px] font-semibold uppercase tracking-widest text-primary-foreground smooth hover:bg-primary-glow"
+        >
+          العودة للمتجر
+        </Link>
+        <a
+          href="https://wa.me/9647702046674"
+          className="inline-flex min-h-11 items-center justify-center border border-border/50 bg-surface-high px-4 py-3 text-[11px] font-semibold uppercase tracking-widest text-foreground smooth hover:border-primary/45 hover:bg-surface-highest"
+        >
+          التواصل عبر WhatsApp
+        </a>
+      </div>
+      {/* TODO: Enable real auth when the Node.js backend is deployed. */}
+    </div>
+  );
+}
+
+export function SocialLoginButtons({
+  redirectTo = "/account",
+  showDivider = true,
+  onError,
+}: {
+  redirectTo?: string;
+  showDivider?: boolean;
+  onError?: (message: string) => void;
+}) {
+  const signInWithGoogle = useAuth((s) => s.signInWithGoogle);
+  const loading = useAuth((s) => s.loading);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3">
+        <button
+          type="button"
+          disabled={!SUPABASE_AUTH_AVAILABLE || loading}
+          title={SUPABASE_AUTH_AVAILABLE ? undefined : "Supabase Auth is not configured yet."}
+          onClick={async () => {
+            const result = await signInWithGoogle(redirectTo);
+            if (result.error) onError?.(result.error);
+          }}
+          className="inline-flex min-h-12 w-full items-center justify-center gap-3 border border-border/50 bg-surface-high px-4 py-3 text-sm font-semibold text-foreground transition-colors duration-200 hover:border-primary/45 hover:bg-surface-highest focus:outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-[13px] font-bold text-black">
+            {loading ? (
+              <span className="h-3.5 w-3.5 rounded-full border-2 border-black/20 border-t-black animate-spin" />
+            ) : (
+              "G"
+            )}
+          </span>
+          <span>المتابعة باستخدام Google</span>
+        </button>
+      </div>
+      {showDivider && (
+        <div className="flex items-center gap-3 text-[11px] uppercase tracking-widest text-muted-foreground/70">
+          <span className="h-px flex-1 bg-border/50" />
+          <span>or</span>
+          <span className="h-px flex-1 bg-border/50" />
+        </div>
+      )}
+    </div>
   );
 }

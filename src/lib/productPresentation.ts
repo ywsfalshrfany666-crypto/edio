@@ -31,6 +31,11 @@ export type PresentationFact = {
   priority: number;
 };
 
+export type PairingSuggestion<T extends PresentationProduct = PresentationProduct> = {
+  product: T;
+  reason: string;
+};
+
 const CATEGORY_LABELS = {
   en: {
     headphones: "Headphones",
@@ -242,6 +247,75 @@ export function getCompatibleAccessories<T extends PresentationProduct>(product:
     .map(({ item }) => item);
 }
 
+export function getPairingSuggestions<T extends PresentationProduct>(
+  product: PresentationProduct,
+  products: T[],
+  lang: "en" | "ar",
+  limit = 4,
+): PairingSuggestion<T>[] {
+  const category = normalizeProductCategory(product);
+  const needsPower = needsAmplification(product);
+  const terms = new Set((product.subCategories || []).map(normalizeKey));
+  const rules: Record<string, Array<{ category: string; terms?: string[]; weight: number }>> = {
+    headphones: [
+      { category: "dac", weight: needsPower ? 14 : 9 },
+      { category: "dap", weight: 5 },
+      { category: "accessories", terms: ["audio-cables", "cable-convertors", "cases"], weight: 6 },
+    ],
+    iems: [
+      { category: "dac", weight: 7 },
+      { category: "dap", weight: 7 },
+      { category: "accessories", terms: ["eartips", "audio-cables", "cable-convertors", "cases"], weight: 8 },
+    ],
+    dac: [
+      { category: "headphones", weight: 7 },
+      { category: "iems", weight: 6 },
+      { category: "accessories", terms: ["audio-cables", "cable-convertors"], weight: 7 },
+    ],
+    dap: [
+      { category: "iems", weight: 8 },
+      { category: "headphones", weight: 6 },
+      { category: "accessories", terms: ["audio-cables", "cases"], weight: 6 },
+    ],
+    mic: [
+      { category: "audio-interface", weight: productText(product).includes("xlr") ? 14 : 9 },
+      { category: "accessories", terms: ["audio-cables", "cable-convertors"], weight: 7 },
+      { category: "headphones", weight: 4 },
+    ],
+    "audio-interface": [
+      { category: "mic", weight: 10 },
+      { category: "headphones", weight: 7 },
+      { category: "accessories", terms: ["audio-cables", "cable-convertors"], weight: 8 },
+    ],
+    accessories: [],
+  };
+  const activeRules = rules[category] || [];
+  if (!activeRules.length) return [];
+
+  return products
+    .filter((item) => item.id !== product.id)
+    .map((item) => {
+      const itemCategory = normalizeProductCategory(item);
+      const itemTerms = (item.subCategories || []).map(normalizeKey);
+      const matchedRule = activeRules.find((rule) => rule.category === itemCategory);
+      if (!matchedRule) return { item, score: 0, reason: "" };
+
+      const termScore = (matchedRule.terms || []).reduce(
+        (score, term) => score + (itemTerms.includes(term) ? 3 : 0),
+        0,
+      );
+      const sharedTerms = itemTerms.filter((term) => terms.has(term)).length;
+      const stockScore = item.inStock ? 2 : 0;
+      const score = matchedRule.weight + termScore + sharedTerms + stockScore;
+
+      return { item, score, reason: pairingReason(category, itemCategory, itemTerms, needsPower, lang) };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score || Number(a.item.price || 0) - Number(b.item.price || 0))
+    .slice(0, limit)
+    .map(({ item, reason }) => ({ product: item, reason }));
+}
+
 export function getSimilarProducts<T extends PresentationProduct>(product: PresentationProduct, products: T[], limit = 4) {
   const category = normalizeProductCategory(product);
   const productTerms = new Set((product.subCategories || []).map(normalizeKey));
@@ -317,6 +391,65 @@ function looksLikeSpecDump(value: string) {
   const labels = ["frequency response", "impedance", "sensitivity", "driver", "headphone type", "speaker diameter", "connector", "cable length", "bluetooth version", "acoustic system"];
   const hits = labels.filter((label) => textValue.includes(label)).length;
   return hits >= 2;
+}
+
+function productText(product: PresentationProduct) {
+  return [
+    product.brand,
+    product.category,
+    ...(product.subCategories || []),
+    product.tagline?.en,
+    product.tagline?.ar,
+    ...(product.features || []),
+    ...(product.specs || []).flatMap((spec) => [specLabel(spec, "en"), specLabel(spec, "ar"), spec.value]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function needsAmplification(product: PresentationProduct) {
+  const value = productText(product);
+  if (/\b(planar|open[-\s]?back|high impedance)\b/i.test(value)) return true;
+  const impedanceMatch = value.match(/(\d{2,3})\s*(?:ohm|Ω)/i);
+  return impedanceMatch ? Number(impedanceMatch[1]) >= 80 : false;
+}
+
+function pairingReason(
+  sourceCategory: string,
+  targetCategory: string,
+  targetTerms: string[],
+  needsPower: boolean,
+  lang: "en" | "ar",
+) {
+  if (sourceCategory === "mic" && targetCategory === "audio-interface") {
+    return lang === "ar" ? "مناسب للمايكروفونات التي تحتاج كرت صوت." : "Recommended for microphone setups.";
+  }
+  if (sourceCategory === "audio-interface" && targetCategory === "mic") {
+    return lang === "ar" ? "يبني سلسلة تسجيل واضحة وبسيطة." : "Builds a simple recording chain.";
+  }
+  if ((sourceCategory === "headphones" || sourceCategory === "iems") && targetCategory === "dac") {
+    return needsPower
+      ? lang === "ar"
+        ? "مفيد للاستماع المكتبي مع سماعات تحتاج طاقة."
+        : "Good match for power-hungry desktop listening."
+      : lang === "ar"
+        ? "يحسّن التحكم والتوصيل اليومي."
+        : "Useful for cleaner everyday playback.";
+  }
+  if (targetCategory === "dap") {
+    return lang === "ar" ? "مفيد للاستماع المحمول بدون تعقيد." : "Useful for portable listening.";
+  }
+  if (targetTerms.includes("eartips")) {
+    return lang === "ar" ? "يساعد على ضبط الراحة والعزل." : "Helps fine-tune fit and isolation.";
+  }
+  if (targetTerms.includes("audio-cables") || targetTerms.includes("cable-convertors")) {
+    return lang === "ar" ? "يكمل التوصيل حسب جهازك." : "Completes the connection for your setup.";
+  }
+  if (targetCategory === "headphones") {
+    return lang === "ar" ? "مناسب للمراقبة أو الاستماع المركز." : "Good for monitoring or focused listening.";
+  }
+  return lang === "ar" ? "اختيار عملي لنفس طريقة الاستخدام." : "A practical match for the same setup.";
 }
 
 function trimSentence(value: string, maxLength: number) {

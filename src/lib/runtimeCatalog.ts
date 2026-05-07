@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  API_ENABLED,
   API_BASE_URL,
   apiRequest,
   type ApiCategory,
@@ -20,7 +21,8 @@ export type RuntimeProduct = Product & {
   officialPrice?: number | null;
   officialPriceUsd?: number | null;
   storedBadge?: "new" | "featured" | "best" | "preowned" | null;
-  stock: number;
+  stock?: number;
+  publicStock?: ApiProduct["publicStock"];
   sales: number;
   isNewArrival?: boolean;
   createdAt: string;
@@ -41,6 +43,7 @@ type RuntimeCatalogState = {
 
 let catalogCache: RuntimeCatalogState | null = null;
 let catalogPromise: Promise<RuntimeCatalogState> | null = null;
+let fallbackCatalogCache: RuntimeCatalogState | null = null;
 
 function resolveProductMediaUrl(path: string) {
   const value = String(path || "").trim();
@@ -48,6 +51,17 @@ function resolveProductMediaUrl(path: string) {
   if (/^https?:\/\//i.test(value)) return value;
   if (value.startsWith("/media/imports/")) return `${API_BASE_URL}${value}`;
   return value;
+}
+
+function resolveDescriptionBlockMedia(block: NonNullable<ApiProduct["descriptionBlocks"]>[number]) {
+  if (!block?.media?.url) return block;
+  return {
+    ...block,
+    media: {
+      ...block.media,
+      url: resolveProductMediaUrl(block.media.url),
+    },
+  };
 }
 
 function mapApiProductToRuntime(product: ApiProduct): RuntimeProduct {
@@ -64,8 +78,11 @@ function mapApiProductToRuntime(product: ApiProduct): RuntimeProduct {
     compareAtUsd: product.officialPriceUsd ?? product.compareAtUsd ?? null,
     officialPrice: product.officialPrice ?? product.compareAt ?? null,
     officialPriceUsd: product.officialPriceUsd ?? product.compareAtUsd ?? null,
+    stock: typeof product.stock === "number" ? product.stock : undefined,
+    publicStock: product.publicStock,
     image: resolveProductMediaUrl(product.image),
     gallery: (product.gallery || []).map(resolveProductMediaUrl),
+    descriptionBlocks: (product.descriptionBlocks || []).map(resolveDescriptionBlockMedia),
     specs: (product.specs || []).map((spec) => ({
       label: typeof spec.label === "string" ? spec.label : spec.label,
       value: spec.value,
@@ -74,7 +91,9 @@ function mapApiProductToRuntime(product: ApiProduct): RuntimeProduct {
 }
 
 function buildFallbackCatalog(): RuntimeCatalogState {
-  return {
+  if (fallbackCatalogCache) return fallbackCatalogCache;
+
+  fallbackCatalogCache = {
     products: fallbackProducts.map((product) => ({
       ...product,
       category: normalizeProductCategory(product),
@@ -84,7 +103,7 @@ function buildFallbackCatalog(): RuntimeCatalogState {
       officialPrice: product.compareAt ?? null,
       officialPriceUsd: product.compareAt ? Number((product.compareAt / 1300).toFixed(2)) : null,
       storedBadge: product.badge ?? null,
-      stock: product.inStock ? 8 : 0,
+      stock: undefined,
       sales: 0,
       isNewArrival: product.badge === "new",
       createdAt: "",
@@ -93,9 +112,17 @@ function buildFallbackCatalog(): RuntimeCatalogState {
     categories: fallbackCategories.map((category) => ({ ...category, productCount: 0 })),
     brands: fallbackBrands,
   };
+  return fallbackCatalogCache;
 }
 
 export async function fetchRuntimeCatalog(force = false): Promise<RuntimeCatalogState> {
+  if (!API_ENABLED) {
+    const fallback = buildFallbackCatalog();
+    catalogCache = fallback;
+    catalogPromise = null;
+    return fallback;
+  }
+
   if (!force && catalogCache) return catalogCache;
   if (!force && catalogPromise) return catalogPromise;
 

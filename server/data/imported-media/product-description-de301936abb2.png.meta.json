@@ -1,0 +1,43 @@
+{
+  "action": "png_alpha_flattened_to_white",
+  "background": "#FFFFFF",
+  "deterministic": true,
+  "shadow": false,
+  "gradient": false,
+  "before": {
+    "width": 3602,
+    "height": 1524,
+    "format": "png",
+    "colorType": 6,
+    "bitDepth": 8,
+    "transparent": false,
+    "hasAlphaChannel": true
+  },
+  "after": {
+    "width": 1500,
+    "height": 1500,
+    "format": "png",
+    "colorType": 2,
+    "bitDepth": 8,
+    "transparent": false,
+    "hasAlphaChannel": false,
+    "background": "#FFFFFF",
+    "alphaRemoved": true,
+    "objectFit": "contain",
+    "contentBox": {
+      "x": 0,
+      "y": 0,
+      "width": 3602,
+      "height": 1524
+    },
+    "outputContentBox": {
+      "x": 120,
+      "y": 483,
+      "width": 1260,
+      "height": 533
+    }
+  },
+  "sourceName": "Screenshot 2026-05-02 at 12.36.05 pm.png",
+  "sourceUrl": "Screenshot 2026-05-02 at 12.36.05 pm.png",
+  "kind": "upload"
+}

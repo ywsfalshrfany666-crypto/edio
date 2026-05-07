@@ -3,6 +3,7 @@ import {
   getCardMeta,
   getCompatibleAccessories,
   getOrderedSpecs,
+  getPairingSuggestions,
   getProductHighlights,
   getSimilarProducts,
 } from "./productPresentation";
@@ -50,5 +51,17 @@ describe("product presentation helpers", () => {
 
     expect(getCompatibleAccessories(headphone, products).map((item) => item.id)).toEqual(["c1"]);
     expect(getSimilarProducts(headphone, products).map((item) => item.id)).toContain("h2");
+  });
+
+  it("adds pairing reasons without inventing products", () => {
+    const products = [
+      headphone,
+      { id: "dac1", brand: "FiiO", category: "dac", subCategories: ["desktop"], inStock: true, price: 220 },
+      { id: "c1", brand: "Tripowin", category: "accessories", subCategories: ["audio-cables"], inStock: true, price: 20 },
+    ];
+
+    const pairings = getPairingSuggestions(headphone, products, "en");
+    expect(pairings.map((item) => item.product.id)).toContain("dac1");
+    expect(pairings.every((item) => item.reason.length > 0)).toBe(true);
   });
 });

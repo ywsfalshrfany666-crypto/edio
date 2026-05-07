@@ -1,9 +1,13 @@
 import { Suspense, lazy } from "react";
 import { Layout } from "@/components/layout/Layout";
+import { Seo } from "@/components/Seo";
 import { Hero } from "@/components/home/Hero";
-import { BrandStrip } from "@/components/home/BrandStrip";
 import { DeferredSection } from "@/components/perf/DeferredSection";
+import { buildOrganizationJsonLd, buildWebsiteJsonLd } from "@/lib/seo";
 
+const BrandStrip = lazy(() =>
+  import("@/components/home/BrandStrip").then((m) => ({ default: m.BrandStrip })),
+);
 const ArchitectureGrid = lazy(() =>
   import("@/components/home/ArchitectureGrid").then((m) => ({ default: m.ArchitectureGrid })),
 );
@@ -48,39 +52,51 @@ function SectionPlaceholder({ dark = false, compact = false }: { dark?: boolean;
 const Index = () => {
   return (
     <Layout>
+      <Seo
+        title="edio"
+        isHome
+        description="edio is a premium audio store in Iraq for headphones, IEMs, DAC, amplifiers, microphones, and audiophile accessories."
+        image="/og/edio-og.png"
+        imageAlt="edio premium audio store"
+        jsonLd={[buildOrganizationJsonLd(), buildWebsiteJsonLd()]}
+      />
       <Hero />
-      <div data-reveal="fade"><BrandStrip /></div>
-      <DeferredSection fallback={<SectionPlaceholder dark compact />}>
+      <DeferredSection rootMargin="0px 0px" fallback={<div className="bg-surface-lowest py-10" />}>
+        <Suspense fallback={<div className="bg-surface-lowest py-10" />}>
+          <div data-reveal="fade"><BrandStrip /></div>
+        </Suspense>
+      </DeferredSection>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder dark compact />}>
         <Suspense fallback={<SectionPlaceholder dark compact />}>
           <div data-reveal><ArchitectureGrid /></div>
         </Suspense>
       </DeferredSection>
-      <DeferredSection fallback={<SectionPlaceholder />}>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder />}>
         <Suspense fallback={<SectionPlaceholder />}>
           <div data-reveal><FeaturedRelease /></div>
         </Suspense>
       </DeferredSection>
-      <DeferredSection fallback={<SectionPlaceholder compact />}>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder compact />}>
         <Suspense fallback={<SectionPlaceholder compact />}>
           <div data-reveal><BestSellers /></div>
         </Suspense>
       </DeferredSection>
-      <DeferredSection fallback={<SectionPlaceholder dark compact />}>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder dark compact />}>
         <Suspense fallback={<SectionPlaceholder dark compact />}>
           <div data-reveal><NewArrivals /></div>
         </Suspense>
       </DeferredSection>
-      <DeferredSection fallback={<SectionPlaceholder dark />}>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder dark />}>
         <Suspense fallback={<SectionPlaceholder dark />}>
           <div data-reveal><EditorialBlock /></div>
         </Suspense>
       </DeferredSection>
-      <DeferredSection fallback={<SectionPlaceholder />}>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder />}>
         <Suspense fallback={<SectionPlaceholder />}>
           <div data-reveal><PreOwnedBlock /></div>
         </Suspense>
       </DeferredSection>
-      <DeferredSection fallback={<SectionPlaceholder dark compact />}>
+      <DeferredSection rootMargin="160px 0px" fallback={<SectionPlaceholder dark compact />}>
         <Suspense fallback={<SectionPlaceholder dark compact />}>
           <div data-reveal><TrustGrid /></div>
         </Suspense>

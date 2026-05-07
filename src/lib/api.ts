@@ -1,6 +1,12 @@
-export const API_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ||
-  (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8787");
+import type { ProductDescriptionBlock, ProductRelationship } from "@/data/catalog";
+import type { ProductPageContent } from "@/lib/productContent/productContentTypes";
+
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim().replace(/\/$/, "");
+
+export const API_ENABLED = Boolean(configuredApiBaseUrl) || import.meta.env.DEV;
+export const API_BASE_URL = configuredApiBaseUrl || "";
+export const AUTH_API_AVAILABLE = Boolean(configuredApiBaseUrl) || import.meta.env.DEV;
+export const COOKIE_SESSION_TOKEN = "cookie-session";
 
 export class ApiError extends Error {
   status: number;
@@ -115,12 +121,23 @@ export type ApiProduct = {
   currency: "IQD";
   image: string;
   gallery: string[];
+  productPage?: ProductPageContent;
+  descriptionBlocks?: ProductDescriptionBlock[];
+  relationships?: ProductRelationship[];
+  productRelationships?: ProductRelationship[];
   storedBadge?: "new" | "featured" | "best" | "preowned" | null;
   badge: "new" | "featured" | "best" | "preowned" | null;
   features: string[];
   specs: Array<{ label: string | { en: string; ar: string }; value: string }>;
   inStock: boolean;
-  stock: number;
+  stock?: number;
+  publicStock?: {
+    availability: "in_stock" | "out_of_stock" | "pre_order" | "discontinued" | "hidden";
+    stock_display: string;
+    low_stock: boolean;
+    low_stock_quantity: number | null;
+    severity: "success" | "warning" | "danger" | "neutral";
+  };
   sales: number;
   isNewArrival?: boolean;
   availabilityStatus?: "in_stock" | "out_of_stock" | "pre_order" | "discontinued" | "hidden";
@@ -193,7 +210,7 @@ export type ApiCategory = {
 };
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const url = new URL(path, `${API_BASE_URL}/`);
+  const url = new URL(path, configuredApiBaseUrl ? `${API_BASE_URL}/` : globalThis.location?.origin || "https://edio-iq.com");
   if (options.searchParams) {
     for (const [key, value] of Object.entries(options.searchParams)) {
       if (value === undefined || value === null || value === "") continue;
@@ -201,12 +218,13 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     }
   }
 
+  const bearerToken = options.token && options.token !== COOKIE_SESSION_TOKEN ? options.token : "";
   const response = await fetch(url.toString(), {
     method: options.method || "GET",
     credentials: "include",
     headers: {
       ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
   });

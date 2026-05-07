@@ -33,7 +33,7 @@ export function CartDrawer() {
           return product ? { ...item, product } : null;
         })
         .filter((item): item is (typeof rawItems)[number] & { product: (typeof products)[number] } => item !== null),
-    [rawItems],
+    [products, rawItems],
   );
   const subtotal = useMemo(() => items.reduce((sum, item) => sum + item.product.price * item.quantity, 0), [items]);
   const discount = useMemo(() => getCartDiscount(subtotal, coupon), [coupon, subtotal]);
@@ -97,7 +97,7 @@ export function CartDrawer() {
                     onClick={close}
                     className={cn(PRODUCT_IMAGE_CANVAS_CLASS, "block h-20 w-20 shrink-0 overflow-hidden")}
                   >
-                    <img src={i.product.image} alt={i.product.name[lang]} className="h-full w-full object-contain p-2" loading="lazy" />
+                    <img src={i.product.image} alt={i.product.name[lang]} className="h-full w-full object-contain p-2" width={160} height={160} loading="lazy" decoding="async" />
                   </Link>
                   <div className="flex-1 min-w-0">
                     <Link to={`/product/${i.product.slug}`} onClick={close} className="line-clamp-1 text-sm font-medium hover:text-primary">

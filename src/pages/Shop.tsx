@@ -3,8 +3,11 @@ import { useTranslation } from "react-i18next";
 import { useSearchParams, Link } from "react-router-dom";
 import { SlidersHorizontal, X, ArrowRight, Search, ChevronDown } from "lucide-react";
 import { Layout } from "@/components/layout/Layout";
+import { Seo } from "@/components/Seo";
 import { ProductCard } from "@/components/shop/ProductCard";
+import { ProductGridViewToggle } from "@/components/shop/ProductGridViewToggle";
 import { SearchSuggestions } from "@/components/shop/SearchSuggestions";
+import { SmartBuyingAssistant } from "@/components/shop/SmartBuyingAssistant";
 import { brandList as staticBrandList, categories as staticCategories, formatPrice, type CategorySlug } from "@/data/catalog";
 import { getBrandLogo } from "@/data/brandLogos";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -12,10 +15,19 @@ import { formatNumber } from "@/lib/formatting";
 import { cn } from "@/lib/utils";
 import { useCurrency } from "@/store/currency";
 import { useRuntimeCatalog } from "@/lib/runtimeCatalog";
+import { useProductGridView } from "@/lib/productGridView";
+import { getSearchHint, matchesProductSearch, scoreProductSearch } from "@/lib/search";
+import { buildBreadcrumbJsonLd, buildWebsiteJsonLd } from "@/lib/seo";
 
 type SortKey = "featured" | "priceAsc" | "priceDesc" | "newest";
 
+const INITIAL_PRODUCT_RENDER_COUNT = 24;
 const hiddenBrandCardKeys = new Set(["audiotechnica", "crown", "hue"]);
+const sortKeys = new Set<SortKey>(["featured", "priceAsc", "priceDesc", "newest"]);
+
+function resolveSortParam(value: string | null): SortKey {
+  return value && sortKeys.has(value as SortKey) ? (value as SortKey) : "featured";
+}
 
 const canonicalBrandCardKey = (brand: string) => {
   const key = brand.toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -32,19 +44,22 @@ const Shop = () => {
   const initialBrand = params.get("brand");
   const productsRef = useRef<HTMLDivElement>(null);
   const { products, categories: runtimeCategories, brands: runtimeBrands } = useRuntimeCatalog();
+  const { gridView, setGridView } = useProductGridView();
   const categories = runtimeCategories.length ? runtimeCategories : staticCategories;
   const brandList = runtimeBrands.length ? runtimeBrands : staticBrandList;
 
   const initialFilter = params.get("filter");
+  const sortParam = params.get("sort");
   const [activeCats, setActiveCats] = useState<CategorySlug[]>(initialCat ? [initialCat] : []);
   const [activeBrands, setActiveBrands] = useState<string[]>(initialBrand ? [initialBrand] : []);
   const [maxCatalogPrice] = useState(() =>
     Math.max(2500, ...products.map((p) => p.price)),
   );
   const [priceMax, setPriceMax] = useState(maxCatalogPrice);
-  const [sort, setSort] = useState<SortKey>("featured");
+  const [sort, setSort] = useState<SortKey>(() => resolveSortParam(sortParam));
   const [query, setQuery] = useState("");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [visibleProductCount, setVisibleProductCount] = useState(INITIAL_PRODUCT_RENDER_COUNT);
 
   // Sync brand from URL when changed externally
   useEffect(() => {
@@ -54,31 +69,53 @@ const Shop = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialBrand]);
 
+  useEffect(() => {
+    const nextSort = resolveSortParam(sortParam);
+    setSort((current) => (current === nextSort ? current : nextSort));
+  }, [sortParam]);
+
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     let list = products.filter(
       (p) =>
         (activeCats.length === 0 || activeCats.includes(p.category)) &&
         (activeBrands.length === 0 || activeBrands.includes(p.brand)) &&
         p.price <= priceMax &&
-        (q === "" ||
-          p.name.en.toLowerCase().includes(q) ||
-          p.name.ar.toLowerCase().includes(q) ||
-          p.brand.toLowerCase().includes(q)) &&
+        (q === "" || matchesProductSearch(p, q)) &&
         (initialFilter !== "preowned" || p.badge === "preowned"),
     );
+    if (q) list = [...list].sort((a, b) => scoreProductSearch(b, q) - scoreProductSearch(a, q));
     if (sort === "priceAsc") list = [...list].sort((a, b) => a.price - b.price);
     if (sort === "priceDesc") list = [...list].sort((a, b) => b.price - a.price);
     if (sort === "newest") list = [...list].sort((a, b) => (b.badge === "new" ? 1 : 0) - (a.badge === "new" ? 1 : 0));
     return list;
-  }, [activeCats, activeBrands, priceMax, sort, query, initialFilter]);
+  }, [activeCats, activeBrands, priceMax, sort, query, initialFilter, products]);
+
+  useEffect(() => {
+    setVisibleProductCount(Math.min(INITIAL_PRODUCT_RENDER_COUNT, filtered.length));
+    if (filtered.length <= INITIAL_PRODUCT_RENDER_COUNT) return;
+
+    const showAll = () => setVisibleProductCount(filtered.length);
+    if ("requestIdleCallback" in window) {
+      const idleId = window.requestIdleCallback(showAll, { timeout: 1400 });
+      return () => window.cancelIdleCallback(idleId);
+    }
+
+    const timeoutId = window.setTimeout(showAll, 650);
+    return () => window.clearTimeout(timeoutId);
+  }, [filtered]);
+
+  const visibleProducts = useMemo(
+    () => filtered.slice(0, visibleProductCount),
+    [filtered, visibleProductCount],
+  );
 
   // Compute counts per brand / category from full catalog
   const brandCounts = useMemo(() => {
     const m = new Map<string, number>();
     products.forEach((p) => m.set(p.brand, (m.get(p.brand) || 0) + 1));
     return m;
-  }, []);
+  }, [products]);
 
   const visibleBrandList = useMemo(() => {
     const seen = new Set<string>();
@@ -89,18 +126,18 @@ const Shop = () => {
       seen.add(key);
       return true;
     });
-  }, []);
+  }, [brandList]);
 
   const categoryCounts = useMemo(() => {
     const m = new Map<CategorySlug, number>();
     products.forEach((p) => m.set(p.category, (m.get(p.category) || 0) + 1));
     return m;
-  }, []);
+  }, [products]);
 
   const selectedBrand = activeBrands.length === 1 ? activeBrands[0] : null;
   const selectedBrandProducts = useMemo(
     () => (selectedBrand ? products.filter((p) => p.brand === selectedBrand) : []),
-    [selectedBrand],
+    [products, selectedBrand],
   );
   const selectedBrandLogo = selectedBrand ? getBrandLogo(selectedBrand) : undefined;
   const selectedBrandPriceRange = useMemo(() => {
@@ -114,7 +151,7 @@ const Shop = () => {
       Array.from(new Set(selectedBrandProducts.map((p) => p.category)))
         .map((slug) => categories.find((c) => c.slug === slug))
         .filter((c): c is (typeof categories)[number] => Boolean(c)),
-    [selectedBrandProducts],
+    [categories, selectedBrandProducts],
   );
 
   const scrollToGrid = () => {
@@ -139,6 +176,16 @@ const Shop = () => {
       return next;
     });
     scrollToGrid();
+  };
+
+  const handleSortChange = (nextSort: SortKey) => {
+    setSort(nextSort);
+    setParams((p) => {
+      const next = new URLSearchParams(p);
+      if (nextSort === "featured") next.delete("sort");
+      else next.set("sort", nextSort);
+      return next;
+    });
   };
 
   const FilterPanel = () => (
@@ -211,8 +258,28 @@ const Shop = () => {
 
   return (
     <Layout>
+      <Seo
+        title={lang === "ar" ? "متجر الصوتيات" : "Audio Shop"}
+        canonicalPath="/shop"
+        description={
+          lang === "ar"
+            ? "تسوق سماعات احترافية، IEM، DAC، مضخمات، ميكروفونات وإكسسوارات صوتية من edio في العراق."
+            : "Shop audiophile headphones, IEMs, DAC, amplifiers, microphones, and premium audio accessories from edio in Iraq."
+        }
+        jsonLd={[
+          {
+            "@context": "https://schema.org",
+            "@type": "CollectionPage",
+            name: "edio audio shop",
+            url: "https://edio-iq.com/shop",
+            description: "Premium audio products in Iraq: headphones, IEMs, DAC, amplifiers, microphones, and accessories.",
+            isPartOf: buildWebsiteJsonLd(),
+          },
+          buildBreadcrumbJsonLd([{ name: "Shop", path: "/shop" }]),
+        ]}
+      />
       {/* Hero */}
-      <section data-header-surface="dark" className="section-luxury relative overflow-hidden bg-surface-lowest pb-16 pt-32 md:pb-20 md:pt-36">
+      <section data-header-surface="dark" className="section-luxury relative overflow-hidden bg-surface-lowest pb-7 pt-28 md:pb-8 md:pt-32">
         {/* Decorative background */}
         <div className="absolute inset-0 pointer-events-none opacity-[0.09]" aria-hidden>
           <div className="absolute -top-24 -end-24 h-[480px] w-[480px] rounded-full bg-primary blur-3xl" />
@@ -230,7 +297,7 @@ const Shop = () => {
 
         <div className="container-edio relative">
           {/* Top meta row */}
-          <div className="mb-10 flex items-center justify-between gap-4 border-b border-border/20 pb-6">
+          <div className="mb-6 flex items-center justify-between gap-4 border-b border-border/20 pb-5">
             <div className="flex items-center gap-3">
               <span className="h-1.5 w-1.5 rounded-full bg-primary signal-dot" />
               <p className="label-tech text-primary">{t("nav.shop")}</p>
@@ -246,7 +313,7 @@ const Shop = () => {
           {/* Headline grid */}
           <div className="grid gap-8 md:grid-cols-12 md:items-end">
             <div className="md:col-span-8">
-              <h1 className="font-display text-5xl font-bold leading-[0.9] md:text-7xl lg:text-[5.5rem]">
+              <h1 className="font-display text-4xl font-bold leading-[0.92] md:text-6xl lg:text-[4.9rem]">
                 {t("shop.title")}
                 <span className="inline-block ms-2 align-top text-primary">.</span>
               </h1>
@@ -268,8 +335,8 @@ const Shop = () => {
           </div>
 
           {/* Search */}
-          <div className="group relative mt-12 max-w-2xl">
-            <Search className="absolute start-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-all duration-300 group-focus-within:text-primary group-focus-within:scale-110" />
+          <div className="group relative mt-8 max-w-2xl">
+            <Search className="absolute start-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground transition-[color,transform] duration-200 group-focus-within:scale-[1.03] group-focus-within:text-primary" />
             <input
               type="text"
               value={query}
@@ -283,8 +350,8 @@ const Shop = () => {
             />
             <span
               className={cn(
-                "absolute bottom-0 start-0 h-px bg-primary transition-all duration-500 ease-out",
-                query ? "w-full" : "w-0 group-focus-within:w-full",
+                "absolute bottom-0 start-0 h-px w-full origin-start scale-x-0 bg-primary transition-transform duration-200 ease-out",
+                query ? "scale-x-100" : "group-focus-within:scale-x-100",
               )}
             />
             <kbd className="absolute end-4 top-1/2 hidden -translate-y-1/2 items-center gap-1 border border-border/30 bg-surface-high px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground md:inline-flex">
@@ -308,7 +375,7 @@ const Shop = () => {
         <section data-header-surface="dark" className="bg-background py-8 md:py-12" data-reveal>
           <div className="container-edio">
             <div className="premium-shell">
-            <div className="premium-core grid gap-6 overflow-hidden md:grid-cols-[1.1fr_0.9fr]">
+            <div className="premium-core grid overflow-hidden md:grid-cols-[1.1fr_0.9fr]">
               <div className="p-6 md:p-8 lg:p-10">
                 <p className="label-tech text-primary mb-5">
                   {lang === "ar" ? "صفحة البراند" : "Brand Focus"}
@@ -320,7 +387,10 @@ const Shop = () => {
                         src={selectedBrandLogo}
                         alt={selectedBrand}
                         className="max-h-16 max-w-full object-contain [filter:brightness(0)_invert(1)]"
+                        width={240}
+                        height={80}
                         loading="lazy"
+                        decoding="async"
                       />
                     ) : (
                       <span className="font-display text-2xl font-bold">{selectedBrand}</span>
@@ -332,8 +402,8 @@ const Shop = () => {
                     </h2>
                     <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">
                       {lang === "ar"
-                        ? `مجموعة ${selectedBrand} المتوفرة لدى EDIO، منتقاة حسب المنتجات الموجودة لدينا حتى تصل مباشرة إلى القطع المناسبة بدون تشتيت.`
-                        : `${selectedBrand} products available at EDIO, curated from the pieces we currently carry so you can jump straight into the right gear.`}
+                        ? `مجموعة ${selectedBrand} المتوفرة لدى edio، منتقاة حسب المنتجات الموجودة لدينا حتى تصل مباشرة إلى القطع المناسبة بدون تشتيت.`
+                        : `${selectedBrand} products available at edio, curated from the pieces we currently carry so you can jump straight into the right gear.`}
                     </p>
                   </div>
                 </div>
@@ -379,7 +449,7 @@ const Shop = () => {
 
               <div
                 className={cn(
-                  "grid min-h-[260px] gap-px bg-border/20 md:min-h-full",
+                  "product-image-canvas grid min-h-[260px] md:min-h-full",
                   selectedBrandProducts.length === 1
                     ? "grid-cols-1"
                     : selectedBrandProducts.length === 2
@@ -391,16 +461,18 @@ const Shop = () => {
                   <Link
                     key={product.id}
                     to={`/product/${product.slug}`}
-                    className="group relative flex min-h-[280px] items-center justify-center overflow-hidden bg-background/70"
+                    className="group relative flex min-h-[280px] items-center justify-center overflow-hidden"
                     aria-label={product.name[lang]}
                   >
                     <img
                       src={product.image}
                       alt={product.name[lang]}
-                      className="h-full w-full object-contain opacity-80 transition-all duration-700 group-hover:scale-[1.03] group-hover:opacity-100"
+                      className="h-full w-full object-contain opacity-80 transition-[opacity,transform] duration-300 ease-out group-hover:scale-[1.02] group-hover:opacity-100"
+                      width={640}
+                      height={640}
                       loading="lazy"
+                      decoding="async"
                     />
-                    <div className="absolute inset-0 bg-gradient-to-t from-background/80 via-transparent to-transparent" />
                   </Link>
                 ))}
               </div>
@@ -411,7 +483,7 @@ const Shop = () => {
       )}
 
       {/* Products */}
-      <section data-header-surface="mixed" className="bg-background py-10 md:py-14" ref={productsRef}>
+      <section data-header-surface="mixed" className="bg-background pb-12 pt-8 md:pb-14 md:pt-10" ref={productsRef}>
         <div className="container-edio grid gap-10 lg:grid-cols-[280px_1fr]">
           {/* Desktop filters */}
           <aside className="hidden lg:block lg:sticky lg:top-20 self-start">
@@ -419,6 +491,8 @@ const Shop = () => {
           </aside>
 
           <div>
+            <SmartBuyingAssistant products={products} />
+
             {/* Toolbar */}
             <div className="mb-6 flex flex-wrap items-center justify-between gap-4 border-b border-border/30 pb-5">
               <div className="flex items-center gap-3">
@@ -438,16 +512,19 @@ const Shop = () => {
                   {filtered.length} {t("shop.results")}
                 </span>
               </div>
-              <select
-                value={sort}
-                onChange={(e) => setSort(e.target.value as SortKey)}
-                className="admin-field min-h-11 px-4 py-2.5 text-xs"
-              >
-                <option value="featured">{t("shop.sortOptions.featured")}</option>
-                <option value="priceAsc">{t("shop.sortOptions.priceAsc")}</option>
-                <option value="priceDesc">{t("shop.sortOptions.priceDesc")}</option>
-                <option value="newest">{t("shop.sortOptions.newest")}</option>
-              </select>
+              <div className="flex items-center gap-2">
+                <ProductGridViewToggle value={gridView} onChange={setGridView} />
+                <select
+                  value={sort}
+                  onChange={(e) => handleSortChange(e.target.value as SortKey)}
+                  className="admin-field min-h-11 px-4 py-2.5 text-xs"
+                >
+                  <option value="featured">{t("shop.sortOptions.featured")}</option>
+                  <option value="priceAsc">{t("shop.sortOptions.priceAsc")}</option>
+                  <option value="priceDesc">{t("shop.sortOptions.priceDesc")}</option>
+                  <option value="newest">{t("shop.sortOptions.newest")}</option>
+                </select>
+              </div>
             </div>
 
             {/* Active chips */}
@@ -470,8 +547,13 @@ const Shop = () => {
             )}
 
             {filtered.length > 0 ? (
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {filtered.map((p, i) => (
+              <div
+                className={cn(
+                  "grid sm:grid-cols-2 xl:grid-cols-3",
+                  gridView === "one" ? "grid-cols-1 gap-4" : "grid-cols-2 gap-3 sm:gap-4",
+                )}
+              >
+                {visibleProducts.map((p, i) => (
                   <ProductCard key={p.id} product={p} index={i} />
                 ))}
               </div>
@@ -479,7 +561,9 @@ const Shop = () => {
               <div className="py-32 text-center">
                 <p className="label-tech text-primary mb-3">No matches</p>
                 <p className="font-display text-2xl font-bold mb-2">Nothing here yet.</p>
-                <p className="text-sm text-muted-foreground">Try removing a filter or clearing your search.</p>
+                <p className="text-sm text-muted-foreground">
+                  {query ? getSearchHint(lang) : "Try removing a filter or clearing your search."}
+                </p>
               </div>
             )}
           </div>
@@ -503,16 +587,20 @@ const Shop = () => {
                 <Link
                   key={c.slug}
                   to={`/category/${c.slug}`}
-                  className="group premium-shell relative aspect-square min-h-[150px] overflow-hidden"
+                  className="group shop-category-tile relative aspect-square min-h-[150px] overflow-hidden"
                 >
                   <img
                     src={c.image}
                     alt=""
-                    className="absolute inset-0 h-full w-full object-cover opacity-38 transition-all duration-700 group-hover:scale-105 group-hover:opacity-60"
+                    className="absolute inset-0 h-full w-full object-cover opacity-38 transition-[opacity,transform] duration-300 ease-out group-hover:scale-[1.03] group-hover:opacity-60"
+                    width={420}
+                    height={420}
+                    loading="lazy"
+                    decoding="async"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-background/95 via-background/40 to-transparent" />
                   <div className="absolute inset-0 p-4 flex flex-col justify-between">
-                    <span className="label-tech bg-background/60 backdrop-blur self-start px-2 py-1">{count}</span>
+                    <span className="label-tech self-start text-foreground/72">{count}</span>
                     <div>
                       <p className="font-display text-base font-semibold leading-tight">{obj.name}</p>
                       <span className="mt-1.5 inline-flex items-center gap-1 label-tech text-primary opacity-0 group-hover:opacity-100 transition-opacity duration-300">
@@ -572,7 +660,10 @@ const Shop = () => {
                       src={logo}
                       alt={b}
                       className="max-h-8 max-w-[70%] object-contain opacity-70 group-hover:opacity-100 transition-opacity duration-300 [filter:brightness(0)_invert(1)]"
+                      width={140}
+                      height={64}
                       loading="lazy"
+                      decoding="async"
                     />
                   ) : (
                     <span className="font-display text-xs font-bold tracking-tight text-foreground/80 group-hover:text-foreground">
@@ -618,7 +709,7 @@ function FilterGroup({
       </button>
       <div
         className={cn(
-          "grid transition-all duration-300 ease-out",
+          "grid transition-opacity duration-200 ease-out",
           open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
         )}
       >
@@ -632,9 +723,9 @@ function FilterGroup({
 
 function BrandMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="premium-core px-4 py-3">
+    <div className="min-w-0 border-t border-border/25 pt-3">
       <p className="label-tech mb-1 text-muted-foreground">{label}</p>
-      <p className="font-mono text-sm font-semibold text-foreground">{value}</p>
+      <p className="break-words font-mono text-sm font-semibold leading-relaxed text-foreground">{value}</p>
     </div>
   );
 }

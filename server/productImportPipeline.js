@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildDescriptionBlocksFromImportDraft } from "./productDescriptionMedia.js";
 
 export const IMPORT_PIPELINE_VERSION = "edio-import-pipeline.v1";
 
@@ -46,6 +47,9 @@ export const IMPORT_MODEL_STEP_OUTPUT_SCHEMA = {
           url: { type: "string" },
           role: { type: "string" },
           source_type: { type: "string" },
+          classification_reason: { type: "string" },
+          confidence: { type: "number" },
+          extracted_text: { type: "string" },
         },
       },
     },
@@ -162,6 +166,21 @@ export function buildImportEvidenceFromDraft(draft = {}, context = {}) {
 
 export function buildImportModelStepOutput(draft = {}, evidence = [], context = {}) {
   const normalizedName = normalizeImportProductName(draft.nameEn || context.rawInput || "", draft.brand);
+  const descriptionBlocks = buildDescriptionBlocksFromImportDraft(draft, {
+    sourceUrl: draft.sourceUrl || context.sourceUrl || "",
+    sourceType: context.sourceType || draft.importMeta?.sourceType || "retailer",
+    productName: normalizedName,
+  });
+  const descriptionImageCandidates = descriptionBlocks
+    .filter((block) => block.media?.url)
+    .map((block) => ({
+      url: block.media.url,
+      role: block.media.role || (block.type === "spec_image" ? "spec_image" : "description"),
+      source_type: block.sourceType || "retailer",
+      classification_reason: block.classificationReason || "description_media_candidate",
+      confidence: block.confidence || 0.7,
+      extracted_text: block.extractedText || "",
+    }));
   return {
     raw_input: String(context.rawInput || draft.sourceUrl || draft.nameEn || "").trim(),
     normalized_name: normalizedName,
@@ -176,11 +195,14 @@ export function buildImportModelStepOutput(draft = {}, evidence = [], context = 
       microphone_type: findMicTypeClue(draft, evidence),
       io_counts: findFactValue(draft.specs, "i/o") || findFactValue(draft.specs, "inputs"),
     }),
-    image_candidates: (draft.gallery || []).slice(0, 12).map((url, index) => ({
-      url,
-      role: index === 0 ? "main" : "gallery",
-      source_type: "retailer",
-    })),
+    image_candidates: [
+      ...(draft.gallery || []).slice(0, 12).map((url, index) => ({
+        url,
+        role: index === 0 ? "main" : "gallery",
+        source_type: "retailer",
+      })),
+      ...descriptionImageCandidates,
+    ],
     offers:
       draft.price || draft.priceUsd
         ? [
@@ -307,6 +329,11 @@ export function shouldPreserveAcceptedClassification(product, { force = false } 
 }
 
 export function assignImportPipelineDataToDraft(draft, { job, evidence = [], modelStepOutput, validation, classification, normalizedImages = [], reviewTask = null } = {}) {
+  const descriptionBlocks = buildDescriptionBlocksFromImportDraft(draft, {
+    sourceUrl: draft.sourceUrl || job?.input || "",
+    sourceType: "retailer",
+    productName: draft.nameEn,
+  });
   const pipeline = {
     version: IMPORT_PIPELINE_VERSION,
     jobId: job?.id || null,
@@ -318,9 +345,12 @@ export function assignImportPipelineDataToDraft(draft, { job, evidence = [], mod
     classification,
     normalizedImages,
     reviewTaskId: reviewTask?.id || null,
+    descriptionMedia: descriptionBlocks,
+    descriptionMediaCount: descriptionBlocks.length,
   };
   return {
     ...draft,
+    ...(descriptionBlocks.length ? { descriptionBlocks } : {}),
     nameEn: modelStepOutput?.normalized_name || draft.nameEn,
     catalogClassification: draft.catalogClassification || draft.importMeta?.catalogClassification || null,
     categoryAssignment: classification
@@ -341,6 +371,7 @@ export function assignImportPipelineDataToDraft(draft, { job, evidence = [], mod
       evidenceCount: evidence.length,
       sourceWeights: IMPORT_SOURCE_WEIGHTS,
       normalizedImageCount: normalizedImages.length,
+      descriptionMediaCount: descriptionBlocks.length,
       reviewTaskId: reviewTask?.id || draft.importMeta?.reviewTaskId,
       catalogClassification: draft.importMeta?.catalogClassification || draft.catalogClassification || null,
     },

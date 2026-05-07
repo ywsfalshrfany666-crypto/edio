@@ -51,24 +51,21 @@ export function PreOwnedBlock() {
         </div>
 
         {/* Pillars grid */}
-        <div className="mt-16 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="mt-12 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {pillars.map((p) => (
             <div key={p.title} className="group premium-shell">
-              <div className="premium-core relative flex h-full flex-col gap-4 p-6 md:p-7">
+              <div className="premium-core relative flex h-full flex-row items-center gap-4 p-5 md:p-6">
               <span className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
-                <p.icon className="h-5 w-5 transition-transform duration-500 group-hover:scale-110" />
+	                <p.icon className="h-5 w-5 transition-transform duration-200 group-hover:scale-[1.03]" />
               </span>
-              <div>
+              <div className="min-w-0">
                 <h3 className="font-display text-base font-semibold tracking-tight">
                   {p.title}
                 </h3>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                  {p.desc}
-                </p>
               </div>
               {/* Hover hairline */}
               <span
-                className="absolute inset-x-0 bottom-0 h-px origin-start scale-x-0 bg-primary/60 transition-transform duration-500 group-hover:scale-x-100"
+	                className="absolute inset-x-0 bottom-0 h-px origin-start scale-x-0 bg-primary/60 transition-transform duration-300 group-hover:scale-x-100"
                 aria-hidden
               />
               </div>
@@ -77,16 +74,7 @@ export function PreOwnedBlock() {
         </div>
 
         {/* Footer CTA strip */}
-        <div className="mt-12 flex flex-col items-start justify-between gap-6 border-t border-border/40 pt-10 md:flex-row md:items-center">
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[10px] font-mono uppercase tracking-[0.22em] text-muted-foreground">
-            <span className="inline-flex items-center gap-2">
-              <span className="h-1 w-1 rounded-full bg-primary signal-dot" />
-              {t("preowned.footerAuthentic")}
-            </span>
-            <span className="hidden md:inline">·</span>
-            <span>{t("preowned.footerRotation")}</span>
-          </div>
-
+        <div className="mt-10 flex flex-col items-start justify-between gap-6 border-t border-border/40 pt-8 md:flex-row md:items-center">
           <Link
             to="/pre-owned"
             className="premium-cta group inline-flex items-center gap-3 px-5 py-2.5 text-[11px] font-mono uppercase tracking-[0.22em]"

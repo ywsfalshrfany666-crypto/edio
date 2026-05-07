@@ -2,7 +2,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { CheckCircle2 } from "lucide-react";
 import { useAuth } from "@/store/auth";
-import { AuthLayout, AuthInput, AuthButton } from "@/components/auth/AuthLayout";
+import { AuthLayout, AuthInput, AuthButton, AuthUnavailableNotice } from "@/components/auth/AuthLayout";
+import { AUTH_API_AVAILABLE } from "@/lib/api";
+import { SUPABASE_AUTH_AVAILABLE } from "@/lib/supabaseConfig";
 
 const ForgotPassword = () => {
   const requestPasswordReset = useAuth((s) => s.requestPasswordReset);
@@ -24,11 +26,12 @@ const ForgotPassword = () => {
   return (
     <AuthLayout
       eyebrow="Password reset"
+      seoTitle="Password reset"
       title={sent ? "Check your inbox" : "Forgot password"}
       subtitle={
         sent
           ? "If that email exists in our system, you'll get a reset link in a moment."
-          : "Enter the email tied to your EDIO account and we'll send a reset link."
+          : "Enter the email tied to your edio account and we'll send a reset link."
       }
       footer={
         <>
@@ -39,7 +42,9 @@ const ForgotPassword = () => {
         </>
       }
     >
-      {sent ? (
+      {!AUTH_API_AVAILABLE && !SUPABASE_AUTH_AVAILABLE ? (
+        <AuthUnavailableNotice />
+      ) : sent ? (
         <div className="flex items-start gap-3 border border-emerald-500/30 bg-emerald-500/10 p-4">
           <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
           <p className="text-sm text-foreground/90">

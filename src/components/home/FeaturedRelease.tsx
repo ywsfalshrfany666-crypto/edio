@@ -49,22 +49,22 @@ export function FeaturedRelease() {
       <div className="container-edio grid gap-8 xl:gap-16 xl:grid-cols-12 items-start">
         {/* Image */}
         <div className="relative order-1 xl:col-span-7">
-          <div className="premium-shell mx-auto w-full max-w-[760px]">
-          <div className="product-stage group relative flex aspect-square items-center justify-center overflow-hidden rounded-[0.28rem]">
-            <div className="absolute inset-0 bg-radial-glow opacity-50 transition-opacity duration-700 group-hover:opacity-70" aria-hidden />
-            <div className={cn(PRODUCT_IMAGE_CANVAS_CLASS, "absolute inset-5 flex items-center justify-center overflow-hidden md:inset-7")}>
+          <div className={cn("premium-shell", PRODUCT_IMAGE_CANVAS_CLASS, "group relative mx-auto flex aspect-square w-full max-w-[820px] items-center justify-center")}>
+            <div className="absolute inset-4 flex items-center justify-center overflow-hidden md:inset-6">
               <img
                 src={product.image}
                 alt={product.name[lang]}
-                className="h-full w-full object-contain p-4 transition-transform duration-700 ease-out group-hover:scale-[1.02] md:p-6"
+                width={820}
+                height={820}
+                className="h-full w-full object-contain p-3 transition-transform duration-300 ease-out group-hover:scale-[1.02] md:p-5"
                 loading="lazy"
+                decoding="async"
               />
             </div>
-            <div className="absolute bottom-4 start-4 inline-flex items-center gap-2 bg-background/70 backdrop-blur px-3 py-1.5">
+            <div className="absolute bottom-4 start-4 inline-flex items-center gap-2 px-3 py-1.5 text-neutral-950">
               <span className="h-1.5 w-1.5 rounded-full bg-primary signal-dot" aria-hidden />
-              <span className="label-tech text-foreground">{product.brand}</span>
+              <span className="label-tech text-neutral-950/72">{product.brand}</span>
             </div>
-          </div>
           </div>
         </div>
 
@@ -79,7 +79,7 @@ export function FeaturedRelease() {
           </p>
 
           <dl className="mt-8 grid grid-cols-2 gap-x-6 gap-y-4 max-w-md border-t border-border/30 pt-6">
-            {product.specs.slice(0, 4).map((s, i) => (
+            {product.specs.slice(0, 2).map((s, i) => (
               <div key={i} className="min-w-0">
                 <dt className="label-tech mb-1 truncate">{s.label[lang]}</dt>
                 <dd className="font-mono text-sm text-foreground/90 truncate">{s.value}</dd>

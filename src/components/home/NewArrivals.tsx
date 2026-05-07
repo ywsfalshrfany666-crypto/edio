@@ -91,7 +91,7 @@ export function NewArrivals() {
                 {typeof item === "number" ? (
                   <div className="premium-shell h-full min-h-[26rem] w-full animate-pulse" />
                 ) : (
-                  <ProductCard product={item} index={i} />
+                  <ProductCard product={item} index={i} variant="showcase" />
                 )}
               </CarouselItem>
             ))}
@@ -109,13 +109,13 @@ export function NewArrivals() {
                   onClick={() => api?.scrollTo(i)}
                   className="flex h-11 w-8 items-center justify-center"
                 >
-                  <span
-                    className={`h-1 rounded-full transition-all duration-500 ${
-                      i === selected
-                        ? "w-8 bg-primary"
-                        : "w-3 bg-surface-highest hover:bg-muted-foreground"
-                    }`}
-                  />
+	                  <span
+	                    className={`h-1 w-8 origin-center rounded-full transition-[background-color,transform] duration-200 ${
+	                      i === selected
+	                        ? "scale-x-100 bg-primary"
+	                        : "scale-x-[0.38] bg-surface-highest hover:bg-muted-foreground"
+	                    }`}
+	                  />
                 </button>
               ))}
             </div>

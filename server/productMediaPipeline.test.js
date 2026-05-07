@@ -108,6 +108,29 @@ describe("product media pipeline", () => {
     expect(result.summary.selectedHeroReasons).toContain("explicit_primary_role");
   });
 
+  it("keeps description/spec images out of hero selection", () => {
+    const result = buildProductMediaSet(
+      [
+        {
+          url: "/media/imports/he6se-v2-spec-chart.jpg",
+          sourceType: "official",
+          role: "spec_image",
+          metadata: { width: 1200, height: 1800, format: "jpg" },
+        },
+        {
+          url: "/media/imports/he6se-v2-main-front.jpg",
+          sourceType: "retailer",
+          role: "gallery",
+          metadata: { width: 1100, height: 1100, format: "jpg" },
+        },
+      ],
+      product,
+    );
+
+    expect(result.hero?.url).toContain("main-front");
+    expect(result.media.some((item) => item.role === "spec_image" && item.status === "selected_description_media")).toBe(true);
+  });
+
   it("keeps generated alt text concise and useful", () => {
     const metadata = buildImageMetadata(product, { filename: "he6se-v2-front.jpg" }, "main");
     expect(metadata.altText).toBe("HiFiMAN HE6se V2 front view headphones");
@@ -130,6 +153,7 @@ describe("product media pipeline", () => {
     const candidates = collectImageCandidatesFromSources(
       {
         imageUrls: ["https://retailer.example.com/he6se-gallery-2.jpg"],
+        specImages: ["https://retailer.example.com/he6se-spec-chart.jpg"],
         sources: [
           {
             sourceType: "official",
@@ -151,10 +175,11 @@ describe("product media pipeline", () => {
       { productId: "prod_1", importJobId: "job_1" },
     );
 
-    expect(candidates).toHaveLength(5);
+    expect(candidates).toHaveLength(6);
     expect(candidates[0].productId).toBe("prod_1");
     expect(candidates.some((candidate) => candidate.role === "main" && candidate.sourceType === "official")).toBe(true);
     expect(candidates.some((candidate) => candidate.sourceType === "structured_data")).toBe(true);
+    expect(candidates.some((candidate) => candidate.role === "spec_image")).toBe(true);
     expect(candidates.every((candidate) => candidate.provenance.importJobId === "job_1")).toBe(true);
   });
 

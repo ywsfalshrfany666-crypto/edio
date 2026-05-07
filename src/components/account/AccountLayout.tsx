@@ -1,6 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import { LogOut, User, MapPin, Package, LayoutDashboard } from "lucide-react";
 import { Layout } from "@/components/layout/Layout";
+import { Seo } from "@/components/Seo";
 import { useAuth } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
@@ -11,13 +12,24 @@ const items = [
   { to: "/account/orders", label: "Orders", icon: Package },
 ];
 
-export function AccountLayout({ children, title, eyebrow }: { children: React.ReactNode; title: string; eyebrow?: string }) {
+export function AccountLayout({
+  children,
+  title,
+  eyebrow,
+  seoTitle,
+}: {
+  children: React.ReactNode;
+  title: string;
+  eyebrow?: string;
+  seoTitle?: string;
+}) {
   const user = useAuth((s) => s.user);
   const signOut = useAuth((s) => s.signOut);
   const navigate = useNavigate();
 
   return (
     <Layout>
+      <Seo title={seoTitle || title} description="Manage your edio account." />
       <section className="bg-surface-lowest border-b border-border/30 pt-28 pb-8">
         <div className="container-edio">
           <p className="label-tech text-primary mb-2">{eyebrow || "My account"}</p>

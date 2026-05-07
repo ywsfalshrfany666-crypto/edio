@@ -6,7 +6,7 @@ import { VitePWA } from "vite-plugin-pwa";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
-  const pwaEnabled = process.env.EDIO_DISABLE_PWA !== "1";
+  const pwaEnabled = process.env.EDIO_ENABLE_PWA === "1";
   return {
   server: {
     host: "::",
@@ -60,7 +60,9 @@ export default defineConfig(({ mode }) => {
         navigateFallbackDenylist: [/^\/api/, /^\/auth/],
         cleanupOutdatedCaches: true,
         clientsClaim: true,
-        skipWaiting: false,
+        // Activate updates immediately so the storefront does not stay pinned
+        // to an old product/card bundle after a production build.
+        skipWaiting: true,
         runtimeCaching: [
           {
             // Google Fonts stylesheets
@@ -104,6 +106,41 @@ export default defineConfig(({ mode }) => {
       "@tanstack/react-query",
       "@tanstack/query-core",
     ],
+  },
+  build: {
+    modulePreload: {
+      resolveDependencies(filename, deps) {
+        if (filename.includes("supabase")) return deps;
+        return deps.filter(
+          (dep) => !dep.includes("vendor-supabase") && !dep.includes("supabase-"),
+        );
+      },
+    },
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("react/jsx-runtime")) {
+            return "vendor-react";
+          }
+          if (id.includes("react-router-dom") || id.includes("@remix-run/router")) {
+            return "vendor-router";
+          }
+          if (id.includes("i18next") || id.includes("react-i18next")) {
+            return "vendor-i18n";
+          }
+          if (id.includes("@radix-ui/")) {
+            return "vendor-radix";
+          }
+          if (id.includes("lucide-react")) {
+            return "vendor-icons";
+          }
+          if (id.includes("@tanstack/")) {
+            return "vendor-query";
+          }
+        },
+      },
+    },
   },
   };
 });

@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/store/auth";
-import { AuthLayout, AuthInput, AuthButton } from "@/components/auth/AuthLayout";
+import { AuthLayout, AuthInput, AuthButton, AuthUnavailableNotice } from "@/components/auth/AuthLayout";
 import { useToast } from "@/hooks/use-toast";
+import { AUTH_API_AVAILABLE } from "@/lib/api";
+import { SUPABASE_AUTH_AVAILABLE } from "@/lib/supabaseConfig";
 
 const ResetPassword = () => {
   const navigate = useNavigate();
@@ -31,6 +33,7 @@ const ResetPassword = () => {
   return (
     <AuthLayout
       eyebrow="Set new password"
+      seoTitle="Reset password"
       title="Choose a new one"
       subtitle={token ? "This secure reset link can be used once." : "Open the reset link from your email, then choose a new password."}
       footer={
@@ -39,6 +42,9 @@ const ResetPassword = () => {
         </Link>
       }
     >
+      {!AUTH_API_AVAILABLE && !SUPABASE_AUTH_AVAILABLE ? (
+        <AuthUnavailableNotice />
+      ) : (
       <form onSubmit={onSubmit} className="space-y-5">
         <AuthInput
           label="New password"
@@ -63,6 +69,7 @@ const ResetPassword = () => {
         )}
         <AuthButton loading={loading}>Update password</AuthButton>
       </form>
+      )}
     </AuthLayout>
   );
 };

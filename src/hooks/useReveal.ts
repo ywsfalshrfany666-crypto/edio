@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 /**
- * Apple-style scroll reveal.
+ * Lightweight scroll reveal.
  * Adds `is-visible` to any element with `data-reveal` once it enters the viewport.
  * Respects prefers-reduced-motion.
  */
@@ -16,13 +16,23 @@ export function useReveal() {
       return;
     }
 
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    elements.forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.top < viewportHeight * 0.92) el.classList.add("is-visible");
+    });
+    document.documentElement.classList.add("motion-ready");
+
     const io = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
             const el = entry.target as HTMLElement;
             const delay = el.dataset.revealDelay;
-            if (delay) el.style.transitionDelay = `${delay}ms`;
+            if (delay) {
+              const safeDelay = Math.min(Number(delay) || 0, 160);
+              el.style.transitionDelay = `${safeDelay}ms`;
+            }
             el.classList.add("is-visible");
             io.unobserve(el);
           }
@@ -34,11 +44,12 @@ export function useReveal() {
     elements.forEach((el) => io.observe(el));
 
     // Re-scan when the route changes / new nodes mount
+    const observed = new WeakSet<Element>(elements);
     const mo = new MutationObserver(() => {
       document.querySelectorAll<HTMLElement>("[data-reveal]:not(.is-visible)").forEach((el) => {
-        if (!(el as any).__observed) {
+        if (!observed.has(el)) {
           io.observe(el);
-          (el as any).__observed = true;
+          observed.add(el);
         }
       });
     });
@@ -47,6 +58,7 @@ export function useReveal() {
     return () => {
       io.disconnect();
       mo.disconnect();
+      document.documentElement.classList.remove("motion-ready");
     };
   }, []);
 }

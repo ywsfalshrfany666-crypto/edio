@@ -71,49 +71,63 @@ const brandItems: BrandItem[] = [
 ];
 
 export function BrandStrip() {
-  const { t } = useTranslation();
-  const marqueeItems = [...brandItems, ...brandItems];
+  const { t, i18n } = useTranslation();
+  const isArabic = i18n.language.startsWith("ar");
 
   return (
-    <section data-header-surface="dark" className="section-luxury overflow-hidden bg-surface-lowest py-12">
+    <section
+      data-header-surface="dark"
+      dir={isArabic ? "rtl" : "ltr"}
+      className="section-luxury overflow-hidden bg-surface-lowest py-12"
+    >
       <div className="container-edio mb-7">
         <p className="label-tech text-primary/85">{t("brands.eyebrow")}</p>
       </div>
-      <div className="relative overflow-hidden py-3">
-        <div className="pointer-events-none absolute inset-y-0 start-0 z-10 w-16 bg-gradient-to-r from-surface-lowest to-transparent sm:w-28 rtl:bg-gradient-to-l" />
-        <div className="pointer-events-none absolute inset-y-0 end-0 z-10 w-16 bg-gradient-to-l from-surface-lowest to-transparent sm:w-28 rtl:bg-gradient-to-r" />
-        <div className="marquee flex w-max items-center gap-8 sm:gap-12 lg:gap-16">
-          {marqueeItems.map((b, index) => {
-            const brand = b.brand ?? b.name;
-            const duplicated = index >= brandItems.length;
+      <div className="brand-marquee-viewport relative overflow-hidden py-3" dir="ltr">
+        <div className="pointer-events-none absolute inset-y-0 start-0 z-10 w-16 bg-gradient-to-r from-surface-lowest to-transparent sm:w-28" />
+        <div className="pointer-events-none absolute inset-y-0 end-0 z-10 w-16 bg-gradient-to-l from-surface-lowest to-transparent sm:w-28" />
+        <div className="brand-marquee" aria-label={t("brands.eyebrow")}>
+          {[0, 1].map((groupIndex) => (
+            <div key={groupIndex} className="brand-marquee__group" aria-hidden={groupIndex === 1}>
+              {brandItems.map((b, index) => {
+                const brand = b.brand ?? b.name;
+                const duplicated = groupIndex === 1;
+                const priorityLogo = groupIndex === 0 && index < 8;
 
-            return (
-              <Link
-                key={`${b.name}-${index}`}
-                to={`/shop?brand=${encodeURIComponent(brand)}`}
-                title={b.name}
-                className="group/brand premium-ghost flex h-20 w-[150px] shrink-0 items-center justify-center outline-none sm:w-[190px] lg:w-[210px]"
-                aria-hidden={duplicated}
-                tabIndex={duplicated ? -1 : undefined}
-              >
-                {b.src ? (
-                  <img
-                    src={b.src}
-                    alt={b.name}
-                    className={`w-auto object-contain opacity-90 transition-all duration-500 [filter:brightness(0)_invert(1)] group-hover/brand:opacity-100 group-hover/brand:scale-[1.03] group-focus-visible/brand:opacity-100 ${
-                      b.wide ? "max-h-14 max-w-[200px]" : "max-h-16 max-w-[168px]"
-                    }`}
-                    loading={index < brandItems.length ? "eager" : "lazy"}
-                    decoding={index < brandItems.length ? "sync" : "async"}
-                  />
-                ) : (
-                  <span className="font-display text-lg font-bold tracking-normal text-foreground/90 transition-colors group-hover/brand:text-foreground group-focus-visible/brand:text-foreground sm:text-xl">
-                    {b.name}
-                  </span>
-                )}
-              </Link>
-            );
-          })}
+                return (
+                  <Link
+                    key={`${b.name}-${groupIndex}-${index}`}
+                    to={`/shop?brand=${encodeURIComponent(brand)}`}
+                    title={b.name}
+                    className="group/brand premium-ghost flex h-20 w-[150px] shrink-0 items-center justify-center outline-none sm:w-[190px] lg:w-[210px]"
+                    aria-hidden={duplicated}
+                    tabIndex={duplicated ? -1 : undefined}
+                  >
+                    {b.src ? (
+                      <img
+                        src={b.src}
+                        alt={b.name}
+                        className={`w-auto object-contain opacity-90 transition-[opacity,transform] duration-300 [filter:brightness(0)_invert(1)] group-hover/brand:opacity-100 group-hover/brand:scale-[1.02] group-focus-visible/brand:opacity-100 ${
+                          b.wide ? "max-h-14 max-w-[200px]" : "max-h-16 max-w-[168px]"
+                        }`}
+                        width={b.wide ? 200 : 168}
+                        height={64}
+                        loading={priorityLogo ? "eager" : "lazy"}
+                        decoding="async"
+                      />
+                    ) : (
+                      <span
+                        dir="auto"
+                        className="font-display text-lg font-bold tracking-normal text-foreground/90 transition-colors group-hover/brand:text-foreground group-focus-visible/brand:text-foreground sm:text-xl"
+                      >
+                        {b.name}
+                      </span>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </div>
       </div>
     </section>

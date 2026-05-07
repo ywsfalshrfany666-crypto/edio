@@ -10,7 +10,7 @@ import { createRoutePrefetchHandlers, prefetchRoute } from "@/lib/routePrefetch"
 import { isHeaderSurface, normalizeHeaderSurface, resolveHeaderSurfaceFromRects, type HeaderSurface } from "@/lib/headerTheme";
 import { cn } from "@/lib/utils";
 import { buildNav, type NavItem } from "./navData";
-import edioLogo from "@/assets/edio-logo-original.png";
+import edioLogo from "@/assets/edio-logo-header.png";
 
 export function Logo({ className }: { className?: string }) {
   const { t } = useTranslation();
@@ -24,7 +24,15 @@ export function Logo({ className }: { className?: string }) {
       )}
       aria-label={t("common.home")}
     >
-      <img src={edioLogo} alt="EDIO" className="h-11 w-11 object-contain drop-shadow-[0_10px_30px_hsl(var(--primary)/0.14)] md:h-10 md:w-10" />
+      <img
+        src={edioLogo}
+        alt="edio"
+        width={44}
+        height={44}
+        decoding="async"
+        fetchPriority="high"
+        className="h-11 w-11 rounded-[7px] object-contain drop-shadow-[0_10px_30px_hsl(var(--primary)/0.14)] md:h-10 md:w-10 md:rounded-[6px]"
+      />
     </Link>
   );
 }
@@ -36,6 +44,19 @@ function useAdaptiveHeaderSurface() {
     if (typeof window === "undefined") return;
 
     const root = document.documentElement;
+    const isMobileViewport = window.matchMedia("(max-width: 767px)").matches;
+
+    if (isMobileViewport) {
+      root.setAttribute("data-active-header-surface", "dark");
+      root.setAttribute("data-active-header-theme", "dark");
+      setSurface("dark");
+
+      return () => {
+        root.removeAttribute("data-active-header-surface");
+        root.removeAttribute("data-active-header-theme");
+      };
+    }
+
     let frame = 0;
     let observer: IntersectionObserver | null = null;
     let observedSections = new Set<Element>();
@@ -128,6 +149,7 @@ function LanguageSwitch({ adaptive = false }: { adaptive?: boolean }) {
   const { i18n, t } = useTranslation();
   const isArabic = i18n.language === "ar";
   const next = isArabic ? "en" : "ar";
+  const nextLabel = isArabic ? "English" : "العربية";
   return (
     <button
       onClick={() => i18n.changeLanguage(next)}
@@ -135,12 +157,12 @@ function LanguageSwitch({ adaptive = false }: { adaptive?: boolean }) {
         "touch-target inline-flex items-center justify-center gap-1.5 rounded-full px-2 text-[11px] font-mono font-medium smooth",
         adaptive ? "header-control header-control-muted" : "text-muted-foreground hover:text-foreground",
       )}
-      aria-label={t("common.switchLanguage")}
+      aria-label={`${nextLabel} - ${t("common.switchLanguage")}`}
       lang={isArabic ? "en" : "ar"}
       dir={isArabic ? "ltr" : "rtl"}
     >
       <Globe className="h-3.5 w-3.5" />
-      <span>{isArabic ? "English" : "العربية"}</span>
+      <span className="max-[430px]:sr-only">{nextLabel}</span>
     </button>
   );
 }
@@ -155,10 +177,10 @@ function CurrencySwitch({ adaptive = false }: { adaptive?: boolean }) {
     <button
       onClick={toggle}
       className={cn(
-        "touch-target inline-flex items-center justify-center rounded-full px-2 text-[11px] font-mono font-medium uppercase tracking-widest smooth",
+        "touch-target inline-flex items-center justify-center rounded-full px-2 text-[11px] font-mono font-medium uppercase tracking-widest smooth max-[379px]:hidden",
         adaptive ? "header-control header-control-muted" : "text-muted-foreground hover:text-foreground",
       )}
-      aria-label={t("common.switchCurrency")}
+      aria-label={`${next} - ${t("common.switchCurrency")}`}
       title={`${t("common.switchCurrency")}: ${next}`}
     >
       {next}
@@ -352,34 +374,34 @@ export function Header() {
       <header
         data-header-surface={headerSurface}
         data-header-theme={legacyHeaderTheme}
-        className="site-header signal-motion fixed inset-x-0 top-11 z-50 transition-transform duration-700"
+        className="site-header signal-motion fixed inset-x-0 top-11 z-50 transition-transform duration-300"
       >
         <div
-          className="site-header-core signal-motion mx-auto flex h-16 w-[calc(100%_-_1.5rem)] max-w-[1380px] items-center justify-between border px-3 transition-transform duration-700 md:h-[4.35rem] md:px-5"
+          className="site-header-core signal-motion mx-auto flex h-16 w-[calc(100%_-_1rem)] max-w-[1380px] items-center justify-between rounded-full border px-2 transition-transform duration-300 sm:w-[calc(100%_-_1.5rem)] sm:px-3 md:h-[3.75rem] md:px-4 xl:h-[4.1rem] xl:px-5"
         >
-          <div className="flex items-center gap-3 md:gap-10">
+          <div className="flex min-w-0 items-center gap-2 md:gap-5 xl:gap-8">
             <button
-              className="header-icon-button touch-target group relative inline-flex items-center justify-center rounded-full press md:hidden"
+              className="header-icon-button touch-target group relative inline-flex items-center justify-center rounded-full press xl:hidden"
               onClick={() => setMobileOpen(true)}
               aria-label={t("common.openMenu")}
               aria-expanded={mobileOpen}
             >
-              <span className="signal-motion absolute h-px w-5 -translate-y-1.5 bg-current transition-transform duration-500 group-hover:w-6" />
-              <span className="signal-motion absolute h-px w-5 translate-y-1.5 bg-current transition-transform duration-500 group-hover:w-6" />
+              <span className="signal-motion absolute h-px w-5 -translate-y-1.5 bg-current transition-transform duration-200 group-hover:w-6" />
+              <span className="signal-motion absolute h-px w-5 translate-y-1.5 bg-current transition-transform duration-200 group-hover:w-6" />
             </button>
             <Logo />
           </div>
 
-          <nav className="site-header-nav-pill hidden items-center gap-1 rounded-full border px-1 md:flex">
+          <nav className="site-header-nav-pill hidden items-center gap-0.5 rounded-full border px-1 xl:flex">
             {links.map((l) => (
               <DesktopNavItem key={l.to} item={l} />
             ))}
           </nav>
 
-          <div className="flex items-center gap-3 md:gap-5">
+          <div className="flex shrink-0 items-center gap-1 md:gap-3 xl:gap-5">
             <LanguageSwitch adaptive />
             <CurrencySwitch adaptive />
-            <span className="header-divider hidden h-4 w-px md:block" />
+            <span className="header-divider hidden h-4 w-px lg:block" />
             <button
               onMouseEnter={() => prefetchRoute("/shop")}
               onFocus={() => prefetchRoute("/shop")}
@@ -397,7 +419,7 @@ export function Header() {
             >
               <ShoppingBag className="h-[17px] w-[17px]" />
               {count > 0 && (
-                <span className="absolute -top-2 -end-2 inline-flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-primary px-1 text-[9px] font-mono font-semibold text-primary-foreground animate-in zoom-in-50 duration-300">
+                <span className="motion-panel-in absolute -top-2 -end-2 inline-flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-primary px-1 text-[9px] font-mono font-semibold text-primary-foreground">
                   {count}
                 </span>
               )}
@@ -413,13 +435,13 @@ export function Header() {
 
       {/* Mobile fullscreen menu */}
       {mobileOpen && (
-        <div className="fixed inset-0 z-[60] bg-background/94 backdrop-blur-2xl animate-in fade-in duration-500">
+        <div className="motion-fade-in fixed inset-0 z-[60] bg-background/94 backdrop-blur-2xl">
           <div className="container-edio flex h-16 items-center justify-between md:h-20">
             <Logo />
             <button onClick={() => setMobileOpen(false)} aria-label={t("common.closeMenu")} className="touch-target group relative inline-flex items-center justify-center press">
               <X className="h-5 w-5 opacity-0" aria-hidden />
-              <span className="signal-motion absolute h-px w-6 rotate-45 bg-current transition-transform duration-500 group-hover:scale-x-110" />
-              <span className="signal-motion absolute h-px w-6 -rotate-45 bg-current transition-transform duration-500 group-hover:scale-x-110" />
+              <span className="signal-motion absolute h-px w-6 rotate-45 bg-current transition-transform duration-200 group-hover:scale-x-110" />
+              <span className="signal-motion absolute h-px w-6 -rotate-45 bg-current transition-transform duration-200 group-hover:scale-x-110" />
             </button>
           </div>
           <div
@@ -432,15 +454,15 @@ export function Header() {
               return (
                 <div
                   key={l.to}
-                  className="border-b border-border/20 animate-in fade-in slide-in-from-bottom-4 duration-700"
-                  style={{ animationDelay: `${idx * 55}ms`, animationFillMode: "backwards" }}
+                  className="motion-menu-item border-b border-border/20"
+                  style={{ animationDelay: `${idx * 42}ms`, animationFillMode: "backwards" }}
                 >
                   <div className="flex items-center justify-between py-3">
                     <Link
                       to={l.to}
                       {...createRoutePrefetchHandlers(l.to)}
                       onClick={() => setMobileOpen(false)}
-                    className="flex min-h-12 items-center font-display text-2xl font-bold tracking-tight transition-transform duration-500 hover:translate-x-1 rtl:hover:-translate-x-1"
+                    className="flex min-h-12 items-center font-display text-2xl font-bold tracking-tight transition-transform duration-200 hover:translate-x-1 rtl:hover:-translate-x-1"
                     >
                       {l.label}
                     </Link>
@@ -455,7 +477,7 @@ export function Header() {
                     )}
                   </div>
                   {hasChildren && isOpen && (
-                    <div className="pb-4 ps-2 space-y-4 animate-in fade-in slide-in-from-top-1 duration-300">
+                    <div className="motion-panel-in pb-4 ps-2 space-y-4">
                       {l.groups!.map((g) => (
                         <div key={g.label}>
                           <Link
@@ -563,9 +585,10 @@ function DesktopNavItem({ item }: { item: NavItem }) {
       <NavLink
         to={item.to}
         {...createRoutePrefetchHandlers(item.to)}
+        aria-haspopup={hasDropdown ? "menu" : undefined}
         className={({ isActive }) =>
           cn(
-            "header-nav-link relative inline-flex items-center gap-1 rounded-full px-3 py-3 text-[11px] font-semibold uppercase tracking-widest smooth",
+            "header-nav-link relative inline-flex items-center justify-center gap-1 rounded-full px-2 py-2 text-center text-[9.5px] font-semibold uppercase leading-[1.05] tracking-[0.16em] smooth lg:px-2.5 xl:px-3 xl:py-2.5 xl:text-[10.5px]",
             isActive && "header-nav-link--active",
           )
         }
@@ -579,7 +602,7 @@ function DesktopNavItem({ item }: { item: NavItem }) {
             {/* Underline indicator */}
             <span
               className={cn(
-                "absolute inset-x-3 bottom-1.5 h-px bg-primary origin-center scale-x-0 transition-transform duration-500 ease-out",
+                "absolute inset-x-3 bottom-1.5 h-px bg-primary origin-center scale-x-0 transition-transform duration-200 ease-out",
                 isActive ? "scale-x-100" : "group-hover:scale-x-100",
               )}
               aria-hidden
@@ -591,10 +614,11 @@ function DesktopNavItem({ item }: { item: NavItem }) {
       {hasDropdown && (
         <div
           className={cn(
-            "absolute start-1/2 -translate-x-1/2 top-full pt-1",
-            "opacity-0 invisible translate-y-2 transition-all duration-300 ease-out",
-            "group-hover:opacity-100 group-hover:visible group-hover:translate-y-0",
+            "absolute start-1/2 top-full z-50 -translate-x-1/2 pt-1 rtl:translate-x-1/2",
+            "invisible pointer-events-none translate-y-1 opacity-0 transition-[opacity,transform,visibility] duration-200 ease-out",
+            "group-hover:visible group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100",
           )}
+          role="menu"
         >
           <div className="header-dropdown-panel premium-shell min-w-[280px]">
           <div className="premium-core p-1.5">
@@ -604,6 +628,7 @@ function DesktopNavItem({ item }: { item: NavItem }) {
                   to={g.to ?? item.to}
                   {...createRoutePrefetchHandlers(g.to ?? item.to)}
                   className="flex items-center justify-between gap-4 rounded-sm px-4 py-2.5 text-sm text-foreground/85 hover:bg-surface-high hover:text-primary smooth"
+                  role="menuitem"
                 >
                   <span>{g.label}</span>
                   {g.children && (
@@ -613,10 +638,11 @@ function DesktopNavItem({ item }: { item: NavItem }) {
                 {g.children && (
                   <div
                     className={cn(
-                      "absolute top-0 start-full ps-2",
-                      "opacity-0 invisible -translate-x-1 transition-all duration-300 ease-out",
-                      "group-hover/sub:opacity-100 group-hover/sub:visible group-hover/sub:translate-x-0",
+                      "absolute start-full top-0 z-50 ps-1.5",
+                      "invisible pointer-events-none -translate-x-1 opacity-0 transition-[opacity,transform,visibility] duration-200 ease-out rtl:translate-x-1",
+                      "group-hover/sub:visible group-hover/sub:pointer-events-auto group-hover/sub:translate-x-0 group-hover/sub:opacity-100 group-focus-within/sub:visible group-focus-within/sub:pointer-events-auto group-focus-within/sub:translate-x-0 group-focus-within/sub:opacity-100",
                     )}
+                    role="menu"
                   >
                     <div className="header-dropdown-panel premium-shell min-w-[230px]">
                     <div className="premium-core p-1.5">
@@ -626,6 +652,7 @@ function DesktopNavItem({ item }: { item: NavItem }) {
                           to={c.to}
                           {...createRoutePrefetchHandlers(c.to)}
                           className="block rounded-sm px-4 py-2.5 text-sm text-muted-foreground hover:bg-surface-high hover:text-primary smooth"
+                          role="menuitem"
                         >
                           {c.label}
                         </Link>

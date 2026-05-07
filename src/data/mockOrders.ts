@@ -75,9 +75,9 @@ const order = (
     customerEmail: ["ahmed@example.com", "sara@example.com", "omar@example.com", "layla@example.com", "mustafa@example.com", "noor@example.com", "karim@example.com"][i % 7],
     customerPhone: "+964 770 " + String(1000000 + i * 1234).slice(0, 7),
     shippingAddress: {
-      line1: ["Al-Mansour, Block 12, House 4", "Karrada, Street 24", "Erbil, Italian Village 5", "Basra, Al-Jazair Street", "Mosul, Al-Sukar"][i % 5],
-      city: ["Baghdad", "Baghdad", "Erbil", "Basra", "Mosul"][i % 5],
-      governorate: ["Baghdad", "Baghdad", "Erbil", "Basra", "Nineveh"][i % 5],
+      line1: ["Al-Mansour, Block 12, House 4", "Karrada, Street 24", "Erbil, Italian Village 5", "Basra, Al-Jazair Street", "Iraq"][i % 5],
+      city: ["Baghdad", "Baghdad", "Erbil", "Basra", "Iraq"][i % 5],
+      governorate: ["Baghdad", "Baghdad", "Erbil", "Basra", "Iraq"][i % 5],
     },
     items,
     ...t,

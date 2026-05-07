@@ -8,6 +8,7 @@ import { createRoutePrefetchHandlers } from "@/lib/routePrefetch";
 import { cn } from "@/lib/utils";
 import { useRuntimeCatalog } from "@/lib/runtimeCatalog";
 import { PRODUCT_IMAGE_CANVAS_CLASS } from "@/lib/productImage";
+import { getSearchHint, matchesBrandSearch, matchesProductSearch, normalizeSearchText, scoreProductSearch } from "@/lib/search";
 
 type Props = {
   query: string;
@@ -26,23 +27,19 @@ export const SearchSuggestions = ({ query, open, onClose, onPickBrand }: Props) 
   const [activeIndex, setActiveIndex] = useState(0);
   const { products, brands: brandList } = useRuntimeCatalog();
 
-  const q = query.trim().toLowerCase();
+  const q = normalizeSearchText(query);
 
   const { matchedProducts, matchedBrands } = useMemo(() => {
     if (q.length < 1) return { matchedProducts: [], matchedBrands: [] };
     const matchedBrands = brandList
-      .filter((b) => b.toLowerCase().includes(q))
+      .filter((b) => matchesBrandSearch(b, q))
       .slice(0, MAX_BRANDS);
     const matchedProducts = products
-      .filter(
-        (p) =>
-          p.name.en.toLowerCase().includes(q) ||
-          p.name.ar.toLowerCase().includes(q) ||
-          p.brand.toLowerCase().includes(q),
-      )
+      .filter((p) => matchesProductSearch(p, q))
+      .sort((a, b) => scoreProductSearch(b, q) - scoreProductSearch(a, q))
       .slice(0, MAX_PRODUCTS);
     return { matchedProducts, matchedBrands };
-  }, [q]);
+  }, [brandList, products, q]);
 
   const flatItems = useMemo(
     () => [
@@ -112,6 +109,7 @@ export const SearchSuggestions = ({ query, open, onClose, onPickBrand }: Props) 
             <p className="text-sm text-foreground/80">
               Nothing for <span className="font-mono text-primary">"{query}"</span>
             </p>
+            <p className="mt-3 text-xs text-muted-foreground">{getSearchHint(lang)}</p>
           </div>
         ) : (
           <div className="max-h-[60vh] overflow-y-auto">
@@ -141,7 +139,7 @@ export const SearchSuggestions = ({ query, open, onClose, onPickBrand }: Props) 
                             active ? "bg-surface-high" : "hover:bg-surface-high",
                           )}
                         >
-                          <span className="h-8 w-12 flex items-center justify-center bg-background/60 border border-border/30">
+                          <span className="h-8 w-12 flex items-center justify-center">
                             {logo ? (
                               <img
                                 src={logo}
@@ -185,12 +183,15 @@ export const SearchSuggestions = ({ query, open, onClose, onPickBrand }: Props) 
                             active ? "bg-surface-high" : "hover:bg-surface-high",
                           )}
                         >
-                          <span className={cn(PRODUCT_IMAGE_CANVAS_CLASS, "h-10 w-10 shrink-0 overflow-hidden border border-border/30")}>
+                          <span className={cn(PRODUCT_IMAGE_CANVAS_CLASS, "h-10 w-10 shrink-0 overflow-hidden")}>
                             <img
                               src={p.image}
                               alt=""
                               className="h-full w-full object-contain p-1"
+                              width={80}
+                              height={80}
                               loading="lazy"
+                              decoding="async"
                             />
                           </span>
                           <span className="min-w-0 flex-1">

@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
-import { ArrowRight, ChevronDown, ExternalLink, Instagram, MapPin, MessageCircle, Phone, Send } from "lucide-react";
+import { ArrowRight, ChevronDown, Instagram, MapPin, MessageCircle, Phone } from "lucide-react";
 import { Logo } from "./Header";
 import { cn } from "@/lib/utils";
 
@@ -18,36 +18,32 @@ type FooterGroup = {
 const copy = {
   en: {
     navLabel: "Footer navigation",
+    help: "Help",
     locationPrefix: "Showroom",
     instagram: "Instagram",
-    facebook: "Facebook",
-    telegram: "Telegram",
     needHelp: "Need help choosing gear?",
-    adviceTitle: "Talk to Edio",
-    adviceBody: "Tell us what you listen to and we’ll recommend the right setup.",
+    adviceTitle: "Talk to edio",
+    adviceBody: "Tell us what you listen to. We’ll help you choose the right setup.",
     adviceCta: "Get advice",
     trustLine: "Pre-purchase advice · Order help · After-sales support",
-    company: "Company",
     legal: {
-      copyright: "© {{year}} Edio",
+      copyright: "© {{year}} edio",
       privacy: "Privacy",
       terms: "Terms",
     },
   },
   ar: {
     navLabel: "تنقل الفوتر",
+    help: "المساعدة",
     locationPrefix: "المعرض",
     instagram: "إنستغرام",
-    facebook: "فيسبوك",
-    telegram: "تيليغرام",
     needHelp: "تحتاج مساعدة في اختيار جهازك؟",
-    adviceTitle: "تحدث مع Edio",
-    adviceBody: "أخبرنا بما تستمع إليه وسنقترح لك التجهيز الأنسب.",
+    adviceTitle: "تحدث مع edio",
+    adviceBody: "أخبرنا بما تستمع إليه. سنساعدك في اختيار التجهيز الأنسب.",
     adviceCta: "احصل على نصيحة",
     trustLine: "نصيحة قبل الشراء · مساعدة الطلبات · دعم ما بعد البيع",
-    company: "الشركة",
     legal: {
-      copyright: "© {{year}} Edio",
+      copyright: "© {{year}} edio",
       privacy: "الخصوصية",
       terms: "الشروط",
     },
@@ -71,30 +67,17 @@ export function Footer() {
       ],
     },
     {
-      title: t("footer.sections.support"),
+      title: text.help,
       links: [
-        {
-          label: lang === "ar" ? "تواصل عبر تيليغرام" : "Telegram support",
-          to: "https://t.me/edio_iq",
-          external: true,
-        },
         { label: lang === "ar" ? "واتساب" : "WhatsApp", to: "https://wa.me/9647702046674", external: true },
         { label: t("footer.links.trackOrder"), to: "/account/orders" },
-        { label: t("footer.links.faq"), to: "/about#faq" },
-      ],
-    },
-    {
-      title: text.company,
-      links: [
-        { label: t("footer.links.about"), to: "/about" },
-        { label: t("footer.links.journal"), to: "/#journal" },
       ],
     },
   ];
 
   const legalLinks: FooterLink[] = [
-    { label: text.legal.privacy, to: "/about#privacy" },
-    { label: text.legal.terms, to: "/about#terms" },
+    { label: text.legal.privacy, to: "/privacy" },
+    { label: text.legal.terms, to: "/terms" },
   ];
 
   const isCurrent = (to: string) => {
@@ -105,10 +88,10 @@ export function Footer() {
   };
 
   return (
-    <footer className="edio-footer mt-24" data-header-surface="dark" aria-label={lang === "ar" ? "فوتر الموقع" : "Site footer"}>
+    <footer className="edio-footer" data-header-surface="dark" aria-label={lang === "ar" ? "فوتر الموقع" : "Site footer"}>
       <div className="container-edio">
         <div className="edio-footer__grid">
-          <section className="edio-footer__brand" aria-label="Edio">
+          <section className="edio-footer__brand" aria-label="edio">
             <Logo className="text-2xl" />
             <p className="edio-footer__tagline">{t("footer.tagline")}</p>
 
@@ -121,27 +104,15 @@ export function Footer() {
                 </span>
               </li>
               <li>
-                <a href="tel:+9647702046674" dir="ltr">
+                <a href="tel:+9647702046674" dir={lang === "ar" ? "rtl" : "ltr"} className="edio-footer__phone-link">
                   <Phone className="h-4 w-4" aria-hidden="true" />
-                  <span>+964 770 204 6674</span>
+                  <span dir="ltr">+964 770 204 6674</span>
                 </a>
               </li>
               <li>
                 <a href="https://www.instagram.com/edio.iq/" target="_blank" rel="noopener noreferrer">
                   <Instagram className="h-4 w-4" aria-hidden="true" />
                   <span>{text.instagram}</span>
-                </a>
-              </li>
-              <li>
-                <a href="https://www.facebook.com/edio.iq/" target="_blank" rel="noopener noreferrer">
-                  <ExternalLink className="h-4 w-4" aria-hidden="true" />
-                  <span>{text.facebook}</span>
-                </a>
-              </li>
-              <li>
-                <a href="https://t.me/edio_iq" target="_blank" rel="noopener noreferrer">
-                  <Send className="h-4 w-4" aria-hidden="true" />
-                  <span>{text.telegram}</span>
                 </a>
               </li>
             </ul>
@@ -172,7 +143,7 @@ export function Footer() {
             </h2>
             <p>{text.adviceBody}</p>
             <a
-              href="https://t.me/edio_iq"
+              href="https://wa.me/9647702046674"
               target="_blank"
               rel="noopener noreferrer"
               className="edio-footer__button group"

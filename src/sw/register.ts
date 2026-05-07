@@ -18,6 +18,19 @@ export async function registerServiceWorker() {
   if (inIframe) return;
 
   const host = window.location.hostname;
+  const isLocalHost = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (isLocalHost) {
+    // Older local production previews may already have a SW installed.
+    // Remove it locally so visual QA never gets stuck on stale assets.
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    }
+    return;
+  }
+
   const isPreviewHost =
     host.endsWith(".lovable.app") && host.includes("id-preview");
   if (isPreviewHost) return;

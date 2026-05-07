@@ -37,7 +37,32 @@ const SOURCE_IMAGE_KEYS = [
   "media",
   "imageCandidates",
   "image_candidates",
+  "descriptionImages",
+  "description_images",
+  "specImages",
+  "spec_images",
+  "featureImages",
+  "feature_images",
+  "comparisonImages",
+  "comparison_images",
+  "diagramImages",
+  "diagram_images",
 ];
+
+const SOURCE_IMAGE_KEY_ROLES = {
+  descriptionImages: "description",
+  description_images: "description",
+  specImages: "spec_image",
+  spec_images: "spec_image",
+  featureImages: "feature",
+  feature_images: "feature",
+  comparisonImages: "comparison",
+  comparison_images: "comparison",
+  diagramImages: "diagram",
+  diagram_images: "diagram",
+};
+
+const DESCRIPTION_MEDIA_ROLES = new Set(["description", "feature", "spec_image", "comparison", "diagram"]);
 
 export function checksumBuffer(buffer, algorithm = "sha256") {
   return crypto.createHash(algorithm).update(buffer).digest("hex");
@@ -223,7 +248,9 @@ export function collectImageCandidatesFromSources(input = {}, context = {}) {
         sourceUrl: input.sourceUrl || input.source_url || input.url || "",
         pageUrl: input.pageUrl || input.page_url || input.sourceUrl || input.url || "",
         explicitPrimary: ["image", "mainImage", "main_image", "primaryImage", "primary_image"].includes(key),
-        role: ["image", "mainImage", "main_image", "primaryImage", "primary_image"].includes(key) ? "main" : undefined,
+        role: ["image", "mainImage", "main_image", "primaryImage", "primary_image"].includes(key)
+          ? "main"
+          : SOURCE_IMAGE_KEY_ROLES[key],
       });
     }
   }
@@ -252,7 +279,9 @@ export function collectImageCandidatesFromSources(input = {}, context = {}) {
         sourceUrl: source.sourceUrl || source.source_url || source.url || "",
         pageUrl,
         explicitPrimary: ["image", "mainImage", "main_image", "primaryImage", "primary_image"].includes(key),
-        role: ["image", "mainImage", "main_image", "primaryImage", "primary_image"].includes(key) ? "main" : undefined,
+        role: ["image", "mainImage", "main_image", "primaryImage", "primary_image"].includes(key)
+          ? "main"
+          : SOURCE_IMAGE_KEY_ROLES[key],
         index: sourceIndex,
       });
     }
@@ -385,16 +414,17 @@ export function buildProductMediaSet(rawCandidates = [], product = {}, options =
     })
     .sort((a, b) => b.quality.score - a.quality.score);
 
-  const hero = scored[0] || null;
+  const hero = scored.find((candidate) => isHeroEligibleRole(candidate.role)) || null;
   const media = scored.map((candidate, index) => {
-    const metadata = buildImageMetadata(product, candidate, index === 0 ? "main" : candidate.role);
+    const isSelectedHero = Boolean(hero && candidate.id === hero.id);
+    const metadata = buildImageMetadata(product, candidate, isSelectedHero ? "main" : candidate.role);
     return {
       ...candidate,
-      role: index === 0 ? "main" : normalizeRole(candidate.role === "main" ? "gallery" : candidate.role),
+      role: isSelectedHero ? "main" : normalizeRole(candidate.role === "main" ? "gallery" : candidate.role),
       sortOrder: index,
       altText: candidate.altText || metadata.altText,
       title: candidate.title || metadata.title,
-      status: index === 0 ? "selected_hero" : "selected_gallery",
+      status: isSelectedHero ? "selected_hero" : DESCRIPTION_MEDIA_ROLES.has(candidate.role) ? "selected_description_media" : "selected_gallery",
     };
   });
 
@@ -555,7 +585,16 @@ function normalizeRole(value) {
   const role = String(value || "gallery").toLowerCase();
   if (["hero", "main", "primary", "cover"].includes(role)) return "main";
   if (["ports", "package", "lifestyle", "gallery"].includes(role)) return role;
+  if (["description", "description_image", "detail"].includes(role)) return "description";
+  if (["feature", "infographic"].includes(role)) return "feature";
+  if (["spec", "specs", "spec_image", "technical", "chart"].includes(role)) return "spec_image";
+  if (["comparison", "compare"].includes(role)) return "comparison";
+  if (["diagram", "schematic"].includes(role)) return "diagram";
   return "gallery";
+}
+
+function isHeroEligibleRole(role) {
+  return !DESCRIPTION_MEDIA_ROLES.has(normalizeRole(role));
 }
 
 function numberOrNull(value) {

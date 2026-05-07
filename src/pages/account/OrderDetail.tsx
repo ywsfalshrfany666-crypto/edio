@@ -23,7 +23,7 @@ const OrderDetail = () => {
   const currentStep = orderStatusFlow.indexOf(order.status as OrderStatus);
 
   return (
-    <AccountLayout title={order.number} eyebrow="Account / Orders / Detail">
+    <AccountLayout title={order.number} eyebrow="Account / Orders / Detail" seoTitle="Order details">
       <div className="space-y-8">
         <Link
           to="/account/orders"

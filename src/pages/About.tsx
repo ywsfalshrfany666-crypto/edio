@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Layout } from "@/components/layout/Layout";
+import { Seo } from "@/components/Seo";
 
 const About = () => {
   const { t } = useTranslation();
@@ -8,6 +9,12 @@ const About = () => {
 
   return (
     <Layout>
+      <Seo
+        title="About"
+        description="edio curates premium headphones, IEMs, DACs, microphones, and audio accessories in Iraq with clear support and focused audio guidance."
+        type="website"
+        canonicalPath="/about"
+      />
       <section data-header-surface="dark" className="pt-32 md:pt-44 pb-24 bg-background">
         <div className="container-edio max-w-5xl">
           <p className="label-tech text-primary mb-6">{t("about.eyebrow")}</p>
@@ -40,7 +47,7 @@ const About = () => {
             <p className="label-tech text-primary">FAQ</p>
             <h2 className="mt-5 font-display text-2xl font-semibold tracking-normal">Need a quick answer?</h2>
             <p className="mt-4 max-w-sm text-sm leading-7 text-muted-foreground">
-              Message Edio with the product you are considering. We can help with fit, pairing, availability, and order status.
+              Message edio with the product you are considering. We can help with fit, pairing, availability, and order status.
             </p>
           </article>
           <article id="privacy" className="scroll-mt-28 bg-background p-8 md:p-10">

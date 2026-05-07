@@ -44,7 +44,7 @@ export function EditorialBlock() {
           </p>
 
           {/* Signature row */}
-          <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-4">
+          <div className="mt-8 flex flex-wrap items-center gap-x-8 gap-y-4">
             <Link
               to="/about"
               className="premium-ghost group inline-flex items-center gap-2 px-4 py-2.5 text-[11px] font-mono uppercase tracking-[0.22em] text-foreground"
@@ -52,46 +52,41 @@ export function EditorialBlock() {
               <span>{t("editorial.philosophy")}</span>
               <ArrowUpRight className="h-3.5 w-3.5 transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 rtl:rotate-180" />
             </Link>
-
-            <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.22em] text-muted-foreground">
-              <span className="h-1 w-1 rounded-full bg-primary signal-dot" />
-              <span>{t("editorial.location")}</span>
-            </div>
           </div>
         </div>
 
         {/* Image column */}
         <div className="relative">
           <div className="premium-shell">
-          <div className="relative aspect-[5/4] overflow-hidden rounded-[0.28rem] bg-background">
-            <img
-              src={editorial}
-              alt=""
-              loading="lazy"
-              className="absolute inset-0 h-full w-full object-cover transition-transform duration-700 ease-out hover:scale-[1.03]"
-            />
-            {/* Subtle vignette + gradient */}
-            <div
-              className="absolute inset-0 bg-gradient-to-tr from-background/70 via-background/10 to-transparent"
-              aria-hidden
-            />
-            <div
-              className="absolute inset-0 mix-blend-overlay opacity-40"
-              style={{
-                background:
-                  "radial-gradient(120% 80% at 50% 110%, hsl(var(--primary) / 0.25), transparent 60%)",
-              }}
-              aria-hidden
-            />
+            <div className="relative aspect-[5/4] overflow-hidden">
+              <img
+                src={editorial}
+                alt=""
+                loading="lazy"
+                className="absolute inset-0 h-full w-full object-cover transition-transform duration-300 ease-out hover:scale-[1.02]"
+              />
+              {/* Subtle vignette + gradient */}
+              <div
+                className="absolute inset-0 bg-gradient-to-tr from-background/70 via-background/10 to-transparent"
+                aria-hidden
+              />
+              <div
+                className="absolute inset-0 mix-blend-overlay opacity-40"
+                style={{
+                  background:
+                    "radial-gradient(120% 80% at 50% 110%, hsl(var(--primary) / 0.25), transparent 60%)",
+                }}
+                aria-hidden
+              />
 
-            {/* Caption tag */}
-            <div className="absolute bottom-4 start-4 inline-flex items-center gap-2 border border-border/40 bg-background/60 px-3 py-1.5 backdrop-blur-md">
-              <span className="h-1 w-1 rounded-full bg-primary signal-dot" />
-              <span className="text-[10px] font-mono uppercase tracking-[0.22em] text-foreground/85">
-                {t("editorial.caption")}
-              </span>
+              {/* Caption tag */}
+              <div className="absolute bottom-4 start-4 inline-flex items-center gap-2 px-3 py-1.5">
+                <span className="h-1 w-1 rounded-full bg-primary signal-dot" />
+                <span className="text-[10px] font-mono uppercase tracking-[0.22em] text-foreground/90 [text-shadow:0_1px_16px_rgb(0_0_0_/_0.72)]">
+                  {t("editorial.caption")}
+                </span>
+              </div>
             </div>
-          </div>
           </div>
         </div>
       </div>

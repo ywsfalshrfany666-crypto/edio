@@ -14,11 +14,13 @@ import {
   Sparkles,
 } from "lucide-react";
 import { Layout } from "@/components/layout/Layout";
+import { Seo } from "@/components/Seo";
 import { formatPrice } from "@/data/catalog";
 import { formatDate } from "@/lib/formatting";
 import { useCurrency } from "@/store/currency";
 import { toast } from "sonner";
 import { useRuntimeCatalog } from "@/lib/runtimeCatalog";
+import type { EdioOrderSubmissionResult } from "@/lib/edioOrder";
 
 type OrderItem = { id: string; quantity: number };
 
@@ -30,8 +32,20 @@ type OrderState = {
   discount: number;
   shipping: number;
   total: number;
-  customer: { firstName?: string; phone?: string; address?: string; city?: string };
-  paymentMethod: "cod";
+  customer: {
+    firstName?: string;
+    lastName?: string;
+    email?: string;
+    phone?: string;
+    secondaryPhone?: string;
+    address?: string;
+    city?: string;
+    region?: string;
+    nearestPoint?: string;
+    notes?: string;
+  };
+  orderSubmission?: EdioOrderSubmissionResult;
+  paymentMethod: "qi_card" | "cod";
   etaDays: [number, number];
 };
 
@@ -56,7 +70,7 @@ const OrderConfirmation = () => {
         return product ? { ...i, product } : null;
       })
       .filter((x): x is OrderItem & { product: (typeof products)[number] } => x !== null);
-  }, [order]);
+  }, [order, products]);
 
   if (!order) return <Navigate to="/shop" replace />;
 
@@ -78,6 +92,7 @@ const OrderConfirmation = () => {
 
   return (
     <Layout>
+      <Seo title="Order confirmed" description="Your edio order has been confirmed." />
       {/* Hero confirmation band */}
       <section data-header-surface="dark" className="relative pt-28 md:pt-32 pb-14 md:pb-20 border-b border-border/30 overflow-hidden">
         <div
@@ -245,7 +260,9 @@ const OrderConfirmation = () => {
               <div className="grid sm:grid-cols-2 gap-4">
                 <InfoCard icon={MapPin} title="Delivery To">
                   {order.customer.firstName && (
-                    <p className="text-sm text-foreground">{order.customer.firstName}</p>
+                    <p className="text-sm text-foreground">
+                      {[order.customer.firstName, order.customer.lastName].filter(Boolean).join(" ")}
+                    </p>
                   )}
                   {order.customer.address && (
                     <p className="text-sm text-muted-foreground">{order.customer.address}</p>
@@ -253,19 +270,41 @@ const OrderConfirmation = () => {
                   {order.customer.city && (
                     <p className="text-sm text-muted-foreground">{order.customer.city}</p>
                   )}
+                  {order.customer.region && (
+                    <p className="text-sm text-muted-foreground">{order.customer.region}</p>
+                  )}
+                  {order.customer.nearestPoint && (
+                    <p className="text-sm text-muted-foreground">Nearest point: {order.customer.nearestPoint}</p>
+                  )}
                   {order.customer.phone && (
                     <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                       <Phone className="h-3 w-3" /> {order.customer.phone}
                     </p>
                   )}
+                  {order.customer.email && (
+                    <p className="text-xs text-muted-foreground">{order.customer.email}</p>
+                  )}
                 </InfoCard>
                 <InfoCard icon={Truck} title="Payment">
-                  <p className="text-sm text-foreground">Cash on Delivery</p>
+                  <p className="text-sm text-foreground">
+                    {order.paymentMethod === "qi_card" ? "Qi Card / Master transfer" : "Cash on Delivery"}
+                  </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Please have {formatPrice(order.total, lang, currency)} ready when your order arrives.
+                    {order.paymentMethod === "qi_card"
+                      ? "We will approve the order after receiving the transfer receipt on WhatsApp."
+                      : `Please have ${formatPrice(order.total, lang, currency)} ready when your order arrives.`}
                   </p>
                 </InfoCard>
               </div>
+
+              {order.orderSubmission && (
+                <InfoCard icon={Truck} title="edio Order Storage">
+                  <p className="text-sm text-foreground">{order.orderSubmission.message}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Status: {order.orderSubmission.status} · Alwaseet auto-submit disabled
+                  </p>
+                </InfoCard>
+              )}
             </div>
 
             {/* Right: Totals + CTAs */}

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/store/auth";
 import { Logo } from "@/components/layout/Header";
+import { Seo } from "@/components/Seo";
 import { cn } from "@/lib/utils";
 
 const items = [
@@ -19,13 +20,25 @@ const items = [
   { to: "/admin/users", label: "Users", icon: Users },
 ];
 
-export function AdminLayout({ children, title, eyebrow }: { children: React.ReactNode; title: string; eyebrow?: string }) {
+export function AdminLayout({
+  children,
+  title,
+  eyebrow,
+  seoTitle,
+}: {
+  children: React.ReactNode;
+  title: string;
+  eyebrow?: string;
+  seoTitle?: string;
+}) {
   const user = useAuth((s) => s.user);
   const signOut = useAuth((s) => s.signOut);
   const navigate = useNavigate();
+  const pageTitle = seoTitle || (title === "Dashboard" ? "Admin" : title);
 
   return (
     <div className="min-h-screen bg-background grid lg:grid-cols-[260px_1fr]">
+      <Seo title={pageTitle} pageType="admin" description="edio admin workspace." isAdmin />
       {/* Sidebar */}
       <aside className="hidden lg:flex flex-col border-e border-border/30 bg-surface-lowest sticky top-0 h-screen">
         <div className="px-6 py-6 border-b border-border/30 flex items-center justify-between">

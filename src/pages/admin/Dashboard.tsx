@@ -137,7 +137,8 @@ const Dashboard = () => {
             loading ? (
               <div key={index} className="h-32 animate-pulse bg-surface-high/70" />
             ) : (
-              <div key={item.label} className="border border-border/30 bg-surface-low p-5">
+              <div key={item.label} className="admin-bezel">
+                <div className="admin-core p-5">
                 <div className="flex items-start justify-between mb-4">
                   <item.icon className="h-4 w-4 text-primary" />
                   <span className={cn("text-[10px] font-mono uppercase tracking-widest", item.tone)}>
@@ -146,13 +147,15 @@ const Dashboard = () => {
                 </div>
                 <p className="font-display text-2xl font-bold tabular-nums">{item.value}</p>
                 <p className="text-[12px] text-muted-foreground mt-1">{item.label}</p>
+                </div>
               </div>
             ),
           )}
         </div>
 
         <div className="grid gap-5 lg:grid-cols-3">
-          <div className="lg:col-span-2 border border-border/30 bg-surface-low p-5">
+          <div className="admin-bezel lg:col-span-2">
+            <div className="admin-core p-5">
             <div className="flex items-end justify-between mb-6">
               <div>
                 <p className="label-tech text-primary mb-1">Revenue</p>
@@ -165,7 +168,7 @@ const Dashboard = () => {
                 <div key={index} className="flex-1 flex flex-col items-center gap-2">
                   <div className="w-full bg-surface-high relative h-full flex items-end">
                     <div
-                      className="w-full bg-primary transition-all duration-700"
+	                      className="w-full bg-primary"
                       style={{ height: `${(day.revenue / max) * 100}%` }}
                       title={`${formatNumber(day.revenue)} IQD`}
                     />
@@ -176,9 +179,11 @@ const Dashboard = () => {
                 </div>
               ))}
             </div>
+            </div>
           </div>
 
-          <div className="border border-border/30 bg-surface-low p-5">
+          <div className="admin-bezel">
+            <div className="admin-core p-5">
             <div className="flex items-end justify-between mb-4">
               <div>
                 <p className="label-tech text-primary mb-1">Best sellers</p>
@@ -189,8 +194,8 @@ const Dashboard = () => {
               {topProducts.map((product, index) => (
                 <li key={product.id} className="flex items-center gap-3">
                   <span className="font-mono text-[10px] text-muted-foreground w-4">{index + 1}</span>
-                  <div className="h-8 w-8 bg-background overflow-hidden shrink-0">
-                    <img src={product.image} alt="" className="h-full w-full object-cover" />
+                  <div className="product-image-canvas h-8 w-8 shrink-0 overflow-hidden">
+                    <img src={product.image} alt="" className="h-full w-full object-contain p-0.5" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-[12px] font-medium truncate">{product.name.en}</p>
@@ -200,6 +205,7 @@ const Dashboard = () => {
                 </li>
               ))}
             </ul>
+            </div>
           </div>
         </div>
 
@@ -216,7 +222,7 @@ const Dashboard = () => {
               View all <ArrowUpRight className="h-3 w-3" />
             </Link>
           </div>
-          <div className="border border-border/30 divide-y divide-border/30">
+          <div className="admin-bezel divide-y divide-border/25">
             {(dashboard?.recentOrders || []).map((order) => {
               const meta = orderStatusMeta[order.status];
               return (
@@ -226,8 +232,8 @@ const Dashboard = () => {
                   className="flex items-center justify-between gap-4 p-4 hover:bg-surface-low smooth"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="h-10 w-10 bg-surface-high overflow-hidden shrink-0">
-                      <img src={order.items[0]?.image} alt="" className="h-full w-full object-cover" />
+                    <div className="product-image-canvas h-10 w-10 shrink-0 overflow-hidden">
+                      <img src={order.items[0]?.image} alt="" className="h-full w-full object-contain p-1" />
                     </div>
                     <div className="min-w-0">
                       <p className="font-mono text-[11px] text-muted-foreground">{order.number}</p>

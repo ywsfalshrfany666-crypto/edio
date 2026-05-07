@@ -2,9 +2,11 @@ import http from "node:http";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lookup } from "node:dns/promises";
 import { build } from "esbuild";
 import {
   BULK_CONFIDENCE_THRESHOLD,
@@ -37,6 +39,29 @@ import {
   normalizePngTransparencyToWhite,
 } from "./imageNormalization.js";
 import {
+  buildDescriptionBlocksFromImportDraft,
+  sanitizeDescriptionText,
+} from "./productDescriptionMedia.js";
+import {
+  applyProductWebEnrichment,
+  createProductWebEnrichmentDryRun,
+} from "./productWebEnrichment.js";
+import {
+  WOOCOMMERCE_IMPORT_VERSION,
+  analyzeWooCommerceCsv,
+} from "./woocommerceImport.js";
+import {
+  buildOAuthAuthorizationUrl,
+  consumeOAuthState,
+  createOAuthState,
+  exchangeOAuthCode,
+  getOAuthProviderConfig,
+  getOAuthProviderStatus,
+  normalizeProviderProfile,
+  normalizeRedirectPath,
+  verifyOAuthIdToken,
+} from "./oauthAuth.js";
+import {
   MEDIA_PIPELINE_VERSION,
   buildImportMediaJob,
   buildProductMediaSet,
@@ -45,6 +70,21 @@ import {
   normalizeAssetCandidate,
   retryWithBackoff,
 } from "./productMediaPipeline.js";
+import {
+  PRODUCT_PLATFORM_FEATURE_FLAGS,
+  applyInventoryWebhookUpdate,
+  applyProductLifecycle,
+  backfillProductPlatform,
+  buildInternalRevalidationResponse,
+  createImportProductJob,
+  ensureProductPlatformCollections,
+  serializeProductPlatformProduct,
+  verifyInventoryWebhookSignature,
+} from "./productManagementPlatform.js";
+import {
+  buildProductionReadinessReport,
+  isStorefrontVisibleProduct,
+} from "./productionReadiness.js";
 import { applyNineEndingPricing } from "./pricingPolicy.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -253,8 +293,10 @@ const MODEL_VARIANT_TOKENS = new Set([
 const PORT = Number(process.env.API_PORT || process.env.PORT || 8787);
 const HOST = process.env.API_HOST || "127.0.0.1";
 const JWT_SECRET = process.env.JWT_SECRET || "edio-local-development-secret";
+const DEFAULT_JWT_SECRET = "edio-local-development-secret";
 const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 14;
 const AUTH_SESSION_COOKIE = process.env.EDIO_AUTH_COOKIE_NAME || "edio_session";
+const OAUTH_STATE_COOKIE = process.env.EDIO_OAUTH_STATE_COOKIE_NAME || "edio_oauth_state";
 const AUTH_SESSION_TTL_MS = Number(process.env.EDIO_SESSION_TTL_MS || 1000 * 60 * 60 * 24 * 14);
 const EMAIL_VERIFICATION_TTL_MS = Number(process.env.EDIO_EMAIL_VERIFICATION_TTL_MS || 1000 * 60 * 60 * 24);
 const PASSWORD_RESET_TTL_MS = Number(process.env.EDIO_PASSWORD_RESET_TTL_MS || 1000 * 60 * 60);
@@ -263,14 +305,38 @@ const AUTH_COOKIE_SECURE =
   (process.env.NODE_ENV === "production" && process.env.EDIO_AUTH_COOKIE_SECURE !== "false");
 const AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX = 8;
+const GENERAL_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const MAX_REMOTE_HTML_BYTES = 2_000_000;
+const MAX_REMOTE_IMAGE_BYTES = 8_000_000;
+const ALLOWED_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
+const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif"]);
+const FORBIDDEN_PROFILE_FIELDS = new Set([
+  "role",
+  "isAdmin",
+  "admin",
+  "superAdmin",
+  "super_admin",
+  "passwordHash",
+  "passwordSalt",
+  "emailVerified",
+  "banned",
+  "status",
+  "deletedAt",
+  "internalNotes",
+]);
 const FREE_SHIPPING_THRESHOLD = 150000;
 const SHIPPING_FEE = 5000;
 const IQD_PER_USD = 1300;
 const SUPPORTED_CURRENCIES = ["IQD", "USD"];
 const DEFAULT_BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const ALWASEET_PUBLIC_API_BASE = "https://api.alwaseet-iq.net/v1/merchant";
 
 const ORDER_STATUSES = new Set(["pending", "confirmed", "shipped", "delivered", "cancelled"]);
+const PRODUCT_BADGES = new Set(["new", "featured", "best", "preowned"]);
+const PRODUCT_STATUSES = new Set(["published", "draft", "needs_review", "hidden", "archived"]);
+const PRODUCT_AVAILABILITY_STATUSES = new Set(["in_stock", "out_of_stock", "pre_order", "discontinued", "hidden"]);
+const PRODUCT_RELATIONSHIP_TYPES = new Set(["accessory", "compatible", "similar", "alternative", "same_brand", "blocked"]);
 const PUBLIC_USER_FIELDS = [
   "id",
   "email",
@@ -378,12 +444,18 @@ async function fetchWithBrowserHeaders(
   } = {},
 ) {
   let lastError;
+  let currentUrl = await validateExternalHttpUrl(url);
+  const maxRedirects = 3;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      const response = await fetch(url, {
+      let redirectCount = 0;
+
+      while (redirectCount <= maxRedirects) {
+        const response = await fetch(currentUrl, {
         method,
         signal: AbortSignal.timeout(timeoutMs + attempt * 2000),
+        redirect: "manual",
         headers: {
           "User-Agent": DEFAULT_BROWSER_USER_AGENT,
           Accept: accept,
@@ -392,12 +464,22 @@ async function fetchWithBrowserHeaders(
         ...rest,
       });
 
-      if (attempt < retries && (response.status === 403 || response.status === 408 || response.status === 429 || response.status >= 500)) {
-        await sleep(350 * (attempt + 1));
-        continue;
-      }
+        if (response.status >= 300 && response.status < 400 && response.headers.get("location")) {
+          redirectCount += 1;
+          if (redirectCount > maxRedirects) {
+            throw new ApiError(400, "redirect_limit_exceeded", "External request redirected too many times");
+          }
+          currentUrl = await validateExternalHttpUrl(new URL(response.headers.get("location"), currentUrl));
+          continue;
+        }
 
-      return response;
+        if (attempt < retries && (response.status === 403 || response.status === 408 || response.status === 429 || response.status >= 500)) {
+          await sleep(350 * (attempt + 1));
+          break;
+        }
+
+        return response;
+      }
     } catch (error) {
       lastError = error;
       if (attempt === retries) break;
@@ -406,6 +488,136 @@ async function fetchWithBrowserHeaders(
   }
 
   throw lastError || new Error(`Failed to fetch ${url}`);
+}
+
+async function validateExternalHttpUrl(rawUrl, field = "url") {
+  let parsed;
+  try {
+    parsed = rawUrl instanceof URL ? new URL(rawUrl.toString()) : new URL(String(rawUrl || ""));
+  } catch {
+    throw new ApiError(400, "validation_error", `${field} is invalid`);
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new ApiError(400, "blocked_url", `${field} must use http or https`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new ApiError(400, "blocked_url", `${field} must not include credentials`);
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (isBlockedHostname(hostname)) {
+    throw new ApiError(400, "blocked_url", `${field} points to a private or local host`);
+  }
+
+  const addresses = net.isIP(hostname)
+    ? [{ address: hostname }]
+    : await lookup(hostname, { all: true, verbatim: false }).catch(() => {
+        throw new ApiError(400, "blocked_url", `${field} host could not be resolved safely`);
+      });
+
+  if (!addresses.length || addresses.some((entry) => isPrivateOrReservedIp(entry.address))) {
+    throw new ApiError(400, "blocked_url", `${field} resolved to a private or reserved address`);
+  }
+
+  return parsed;
+}
+
+function isBlockedHostname(hostname) {
+  const clean = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    !clean ||
+    clean === "localhost" ||
+    clean.endsWith(".localhost") ||
+    clean === "metadata.google.internal" ||
+    clean.endsWith(".internal") ||
+    clean.endsWith(".local") ||
+    isPrivateOrReservedIp(clean)
+  );
+}
+
+function isPrivateOrReservedIp(value) {
+  const ipVersion = net.isIP(value);
+  if (!ipVersion) return false;
+
+  if (ipVersion === 4) {
+    const parts = value.split(".").map((part) => Number(part));
+    const [a, b] = parts;
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      a >= 224
+    );
+  }
+
+  const normalized = value.toLowerCase();
+  return (
+    normalized === "::1" ||
+    normalized === "::" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe80:") ||
+    normalized.startsWith("::ffff:127.") ||
+    normalized.startsWith("::ffff:10.") ||
+    normalized.startsWith("::ffff:192.168.") ||
+    normalized.startsWith("::ffff:169.254.")
+  );
+}
+
+async function readResponseBufferWithLimit(response, maxBytes, label = "response") {
+  const declaredSize = Number(response.headers.get("content-length") || 0);
+  if (declaredSize > maxBytes) {
+    throw new ApiError(413, "payload_too_large", `${label} is too large`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > maxBytes) {
+      throw new ApiError(413, "payload_too_large", `${label} is too large`);
+    }
+    return Buffer.from(arrayBuffer);
+  }
+
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      throw new ApiError(413, "payload_too_large", `${label} is too large`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function readResponseTextWithLimit(response, maxBytes, label = "response") {
+  const buffer = await readResponseBufferWithLimit(response, maxBytes, label);
+  return buffer.toString("utf8");
+}
+
+function normalizeContentType(value) {
+  return String(value || "").split(";")[0].trim().toLowerCase();
+}
+
+function assertHtmlResponse(response) {
+  const contentType = normalizeContentType(response.headers.get("content-type"));
+  if (contentType && !["text/html", "application/xhtml+xml", "application/xml", "text/xml"].includes(contentType)) {
+    throw new ApiError(400, "invalid_content_type", "External page did not return HTML");
+  }
+}
+
+function assertImageResponse(response) {
+  const contentType = normalizeContentType(response.headers.get("content-type"));
+  if (contentType && !ALLOWED_IMAGE_CONTENT_TYPES.has(contentType)) {
+    throw new ApiError(400, "invalid_image_type", "Only JPG, PNG, WebP, and AVIF product images are allowed");
+  }
 }
 const BRAND_LOGOS = {
   "7hz": "/src/assets/brands/white/7hz-white.png",
@@ -450,11 +662,56 @@ const seedCoupons = [
 
 let db;
 
+async function fetchAlwaseetPublicJson(endpoint) {
+  const response = await fetch(`${ALWASEET_PUBLIC_API_BASE}${endpoint}`, {
+    headers: { "User-Agent": DEFAULT_BROWSER_USER_AGENT, Accept: "application/json" },
+  });
+  const json = await response.json().catch(() => null);
+  if (!response.ok || !json?.status) {
+    throw new ApiError(502, "alwaseet_lookup_unavailable", "Unable to load Alwaseet shipping options");
+  }
+  return json;
+}
+
+function cleanAlwaseetLookupText(value, max = 160) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function normalizeAlwaseetLookupOption(row, labelKeys) {
+  const id = Number(row?.id);
+  const label = labelKeys.map((key) => cleanAlwaseetLookupText(row?.[key])).find(Boolean);
+  return Number.isFinite(id) && id > 0 && label ? { id, label } : null;
+}
+
+async function loadAlwaseetPublicLookups(cityId) {
+  const [citiesJson, packageSizesJson, regionsJson] = await Promise.all([
+    fetchAlwaseetPublicJson("/citys"),
+    fetchAlwaseetPublicJson("/package-sizes"),
+    cityId ? fetchAlwaseetPublicJson(`/regions?city_id=${encodeURIComponent(String(cityId))}`) : Promise.resolve({ data: [] }),
+  ]);
+  const cityRows = Array.isArray(citiesJson.data) ? citiesJson.data : [];
+  const sizeRows = Array.isArray(packageSizesJson.data) ? packageSizesJson.data : [];
+  const regionRows = Array.isArray(regionsJson.data) ? regionsJson.data : [];
+  return {
+    cities: cityRows
+      .map((row) => normalizeAlwaseetLookupOption(row, ["city_name", "name"]))
+      .filter(Boolean),
+    regions: regionRows
+      .map((row) => normalizeAlwaseetLookupOption(row, ["region_name", "name"]))
+      .filter(Boolean),
+    packageSizes: sizeRows
+      .map((row) => normalizeAlwaseetLookupOption(row, ["size", "title", "name"]))
+      .filter(Boolean),
+  };
+}
+
 async function route(req, res) {
   const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`);
   const pathname = normalizePathname(url.pathname);
   const parts = pathname.split("/").filter(Boolean);
   const method = req.method || "GET";
+  assertAllowedRequestOrigin(req, pathname);
+  applyRouteRateLimits(req, pathname, method);
 
   if (pathname.startsWith("/src/assets/") && method === "GET") {
     return sendStaticAsset(res, pathname);
@@ -473,8 +730,60 @@ async function route(req, res) {
         time: new Date().toISOString(),
         products: db.products.length,
         orders: db.orders.length,
+        productPlatform: {
+          enabled: true,
+          featureFlags: PRODUCT_PLATFORM_FEATURE_FLAGS,
+          variants: db.productVariants?.length || 0,
+          outboxEvents: db.outboxEvents?.length || 0,
+        },
       },
     });
+  }
+
+  if (pathname === "/api/webhooks/inventory-updated" && method === "POST") {
+    const { body, rawBody } = await readJsonRaw(req, { maxBytes: 250_000 });
+    const secret = process.env.EDIO_INVENTORY_WEBHOOK_SECRET || "";
+    const signature = req.headers["x-edio-signature"] || req.headers["x-hub-signature-256"] || req.headers["x-signature"] || "";
+    const verification = verifyInventoryWebhookSignature({ rawBody, signature, secret });
+    if (secret && !verification.ok) {
+      throw new ApiError(401, "invalid_signature", "Inventory webhook signature is invalid");
+    }
+    const result = applyInventoryWebhookUpdate(db, body, {
+      signatureVerified: verification.ok,
+      requestId: getRequestId(req),
+    });
+    writeAuditLog({
+      req,
+      actorUserId: null,
+      action: "inventory.webhook.updated",
+      targetType: "inventory_level",
+      targetId: result.level.id,
+      beforeState: null,
+      afterState: {
+        variantId: result.variant.id,
+        productId: result.variant.productId,
+        level: result.level,
+        signature: verification.reason,
+      },
+    });
+    await saveDatabase();
+    return send(res, 200, { ok: true, data: result });
+  }
+
+  if (pathname === "/api/internal/revalidate" && method === "POST") {
+    const token = process.env.EDIO_INTERNAL_REVALIDATE_TOKEN || "";
+    if (token) {
+      const authorization = String(req.headers.authorization || "");
+      if (authorization !== `Bearer ${token}`) {
+        throw new ApiError(401, "unauthorized", "Internal revalidation token is invalid");
+      }
+    } else if (process.env.NODE_ENV === "production") {
+      throw new ApiError(503, "not_configured", "Internal revalidation token is not configured");
+    }
+    const body = await readJson(req, { maxBytes: 100_000 });
+    const result = buildInternalRevalidationResponse(db, body, { requestId: getRequestId(req) });
+    await saveDatabase();
+    return send(res, 202, { ok: true, data: result });
   }
 
   if (pathname === "/api/currency" && method === "GET") {
@@ -506,7 +815,7 @@ async function route(req, res) {
     return send(res, 200, {
       ok: true,
       data: {
-        products: filterProducts(db.products, url.searchParams),
+        products: filterProducts(db.products, url.searchParams).map(withPublicInventoryProduct),
         categories: db.categories,
         brands: listBrands(),
         coupons: db.coupons.filter((coupon) => coupon.active).map(publicCoupon),
@@ -518,13 +827,27 @@ async function route(req, res) {
 
   if (pathname === "/api/products" && method === "GET") {
     const result = paginate(filterProducts(db.products, url.searchParams), url.searchParams);
+    result.items = result.items.map(withPublicInventoryProduct);
     return send(res, 200, { ok: true, data: result });
+  }
+
+  if (parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "recommendations" && method === "GET") {
+    const product = findProduct(parts[2]);
+    if (!product) throw new ApiError(404, "not_found", "Product not found");
+    if (!isStorefrontVisibleProduct(product)) throw new ApiError(404, "not_found", "Product not found");
+    return send(res, 200, {
+      ok: true,
+      data: getPublicProductRecommendations(product, {
+        lang: url.searchParams.get("lang") === "ar" ? "ar" : "en",
+      }),
+    });
   }
 
   if (parts[0] === "api" && parts[1] === "products" && parts[2] && method === "GET") {
     const product = findProduct(parts[2]);
     if (!product) throw new ApiError(404, "not_found", "Product not found");
-    return send(res, 200, { ok: true, data: withDerivedProduct(product) });
+    if (!isStorefrontVisibleProduct(product)) throw new ApiError(404, "not_found", "Product not found");
+    return send(res, 200, { ok: true, data: withPublicInventoryProduct(product) });
   }
 
   if (pathname === "/api/brands" && method === "GET") {
@@ -555,9 +878,65 @@ async function route(req, res) {
     return send(res, 200, { ok: true, data: getCollection(parts[2], url.searchParams) });
   }
 
+  if (pathname === "/api/alwaseet/lookups" && method === "GET") {
+    const cityId = Number(url.searchParams.get("cityId") || 0);
+    const lookups = await loadAlwaseetPublicLookups(Number.isFinite(cityId) && cityId > 0 ? cityId : undefined);
+    return send(res, 200, { ok: true, data: lookups });
+  }
+
+  if (pathname === "/api/auth/oauth/providers" && method === "GET") {
+    return send(res, 200, { ok: true, data: getOAuthProviderStatus(process.env) });
+  }
+
+  if (parts[0] === "api" && parts[1] === "auth" && parts[2] === "oauth" && parts[3] && parts[4] === "start" && method === "GET") {
+    const provider = parts[3];
+    const config = getOAuthProviderConfig(provider, process.env, getPublicBaseUrl(req));
+    if (!config) throw new ApiError(503, "provider_not_configured", "This sign-in provider is not configured yet.");
+    const state = createOAuthState({
+      provider,
+      redirectTo: url.searchParams.get("redirectTo") || url.searchParams.get("returnTo") || "/account",
+      secret: JWT_SECRET,
+    });
+    setOAuthStateCookie(res, state.cookieValue);
+    redirect(res, buildOAuthAuthorizationUrl(config, state));
+    return;
+  }
+
+  if (parts[0] === "api" && parts[1] === "auth" && parts[2] === "oauth" && parts[3] && parts[4] === "callback" && ["GET", "POST"].includes(method)) {
+    const provider = parts[3];
+    const params = method === "POST" ? await readFormUrlencoded(req, { maxBytes: 64_000 }) : Object.fromEntries(url.searchParams.entries());
+    clearOAuthStateCookie(res);
+    try {
+      const { user, redirectTo } = await completeOAuthLogin(provider, params, req);
+      await createSessionCookie(req, res, user);
+      redirect(res, buildAuthRedirectUrl(req, "/login", "oauth_success", "", redirectTo));
+      return;
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : error?.code || "callback_failed";
+      writeAuditLog({
+        req,
+        action: "auth.oauth.failed",
+        targetType: "oauth",
+        afterState: { provider, code },
+      });
+      await saveDatabase();
+      redirect(res, buildAuthRedirectUrl(req, "/login", "oauth_error", code));
+      return;
+    }
+  }
+
   if ((pathname === "/api/auth/signup" || pathname === "/auth/signup") && method === "POST") {
     const body = await readJson(req);
     const user = await signup(body, req);
+    if (!user) {
+      return send(res, 202, {
+        ok: true,
+        data: {
+          message: "If this email can be registered, a verification message will be sent.",
+          emailVerificationRequired: true,
+        },
+      });
+    }
     const token = signToken(user);
     await createSessionCookie(req, res, user);
     return send(res, 201, { ok: true, data: { user: publicUser(user), token } });
@@ -800,6 +1179,13 @@ async function handleAdminRoute(req, res, url, pathname, parts, admin) {
     });
   }
 
+  if (pathname === "/api/admin/production-readiness" && method === "GET") {
+    return send(res, 200, {
+      ok: true,
+      data: buildProductionReadinessReport(db),
+    });
+  }
+
   if (pathname === "/api/admin/users" && method === "GET") {
     const query = (url.searchParams.get("q") || "").trim().toLowerCase();
     let users = db.users.map((user) => ({
@@ -851,8 +1237,21 @@ async function handleAdminRoute(req, res, url, pathname, parts, admin) {
       user.status = body.status;
       user.banned = body.status === "disabled" || body.status === "deleted";
     }
-    if (body.role && ["admin", "customer"].includes(body.role)) user.role = body.role;
-    if (typeof body.emailVerified === "boolean") user.emailVerified = body.emailVerified;
+    if (body.role !== undefined) {
+      if (admin.role !== "super_admin") {
+        throw new ApiError(403, "forbidden", "Only a super admin can change user roles");
+      }
+      if (!["admin", "customer", "super_admin"].includes(body.role)) {
+        throw new ApiError(400, "validation_error", "Invalid user role");
+      }
+      user.role = body.role;
+    }
+    if (typeof body.emailVerified === "boolean") {
+      if (admin.role !== "super_admin") {
+        throw new ApiError(403, "forbidden", "Only a super admin can verify users manually");
+      }
+      user.emailVerified = body.emailVerified;
+    }
     user.updatedAt = new Date().toISOString();
     writeAuditLog({
       req,
@@ -892,7 +1291,7 @@ async function handleAdminRoute(req, res, url, pathname, parts, admin) {
   }
 
   if (pathname === "/api/admin/products" && method === "GET") {
-    const result = paginate(filterProducts(db.products, url.searchParams), url.searchParams);
+    const result = paginate(filterProducts(db.products, url.searchParams, { includeUnpublished: true }), url.searchParams);
     return send(res, 200, { ok: true, data: result });
   }
 
@@ -900,6 +1299,180 @@ async function handleAdminRoute(req, res, url, pathname, parts, admin) {
     const body = await readJson(req);
     const product = await createProduct(body);
     return send(res, 201, { ok: true, data: product });
+  }
+
+  if (pathname === "/api/admin/import/products" && method === "POST") {
+    const body = await readJson(req, { maxBytes: 1_000_000 });
+    const result = createImportProductJob(db, body, {
+      actorUserId: admin?.id || null,
+      requestId: getRequestId(req),
+    });
+    writeAuditLog({
+      req,
+      actorUserId: admin?.id || null,
+      action: "product.import.previewed",
+      targetType: "import_job",
+      targetId: result.job.id,
+      beforeState: null,
+      afterState: { jobId: result.job.id, itemCount: result.items.length },
+    });
+    await saveDatabase();
+    return send(res, 202, { ok: true, data: result });
+  }
+
+  if (
+    (pathname === "/api/admin/import/woocommerce/analyze" ||
+      pathname === "/api/admin/products/import/woocommerce/analyze") &&
+    method === "POST"
+  ) {
+    const body = await readJson(req, { maxBytes: 24_000_000 });
+    const csvText = await readWooCommerceImportCsv(body);
+    const report = analyzeWooCommerceCsv(csvText, db.products, {
+      existingCategories: db.categories.map((category) => category.slug || category.id || category),
+    });
+    const job = {
+      id: `woo_import_${crypto.randomUUID()}`,
+      version: WOOCOMMERCE_IMPORT_VERSION,
+      mode: "woocommerce_csv_dry_run",
+      input: body.filePath || body.file_path || "inline_csv",
+      sourceUrl: "",
+      status: "dry_run_completed",
+      productId: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      summary: report.summary,
+    };
+    upsertImportJob(job);
+    report.preview.slice(0, 500).forEach((item) => {
+      upsertImportJobItem({
+        id: `woo_import_item_${job.id}_${item.rowNumber}`,
+        jobId: job.id,
+        productId: item.currentProductMatch?.id || null,
+        status: item.action === "review" ? "needs_review" : "previewed",
+        action: item.action,
+        errors: item.warnings,
+        data: item,
+      });
+    });
+    recordImportEvent({
+      jobId: job.id,
+      action: "woocommerce_dry_run_completed",
+      message: "WooCommerce CSV dry-run completed without mutating products.",
+      data: report.summary,
+    });
+    writeAuditLog({
+      req,
+      actorUserId: admin?.id || null,
+      action: "woocommerce_import.dry_run_completed",
+      targetType: "import_job",
+      targetId: job.id,
+      beforeState: null,
+      afterState: {
+        totalRows: report.summary.total_rows,
+        create: report.summary.new_products,
+        update: report.summary.products_to_update,
+        review: report.summary.products_needing_review,
+      },
+    });
+    await saveDatabase();
+    return send(res, 200, { ok: true, data: { job, report } });
+  }
+
+  if (
+    (pathname === "/api/admin/import/woocommerce/apply" ||
+      pathname === "/api/admin/products/import/woocommerce/apply") &&
+    method === "POST"
+  ) {
+    const body = await readJson(req, { maxBytes: 200_000 });
+    if (body.confirm !== true) {
+      return send(res, 200, {
+        ok: true,
+        data: {
+          mode: "plan_only",
+          message: "Run dry-run first, review conflicts, then send confirm=true with selected row ids. No products were changed.",
+          supportedModes: [
+            "apply_all_safe_changes",
+            "apply_selected_rows",
+            "update_existing_only",
+            "create_new_only",
+            "import_images_only",
+            "import_description_media_only",
+            "import_prices_availability_only",
+          ],
+        },
+      });
+    }
+    throw new ApiError(
+      409,
+      "apply_requires_review",
+      "WooCommerce apply is intentionally blocked until a reviewed dry-run selection is supplied. No products were changed.",
+    );
+  }
+
+  if (
+    (pathname === "/api/admin/products/enrichment/dry-run" ||
+      pathname === "/api/admin/products/enrich/dry-run") &&
+    method === "POST"
+  ) {
+    const body = await readJson(req, { maxBytes: 4_000_000 });
+    const report = createProductWebEnrichmentDryRun(db, body, {
+      actorUserId: admin?.id || null,
+      requestId: getRequestId(req),
+    });
+    await saveDatabase();
+    return send(res, 200, { ok: true, data: report });
+  }
+
+  if (
+    (pathname === "/api/admin/products/enrichment/apply" ||
+      pathname === "/api/admin/products/enrich/apply") &&
+    method === "POST"
+  ) {
+    const body = await readJson(req, { maxBytes: 4_000_000 });
+    const result = applyProductWebEnrichment(db, body, {
+      actorUserId: admin?.id || null,
+      requestId: getRequestId(req),
+    });
+    await saveDatabase();
+    return send(res, 200, { ok: true, data: result });
+  }
+
+  if (parts[2] === "products" && parts[3] && !parts[4] && method === "GET") {
+    const product = findProduct(parts[3]);
+    if (!product) throw new ApiError(404, "not_found", "Product not found");
+    const details = serializeProductPlatformProduct(db, product);
+    return send(res, 200, { ok: true, data: details });
+  }
+
+  if (
+    parts[2] === "products" &&
+    parts[3] &&
+    ["publish", "unpublish", "schedule"].includes(parts[4]) &&
+    method === "POST"
+  ) {
+    const body = await readJson(req, { maxBytes: 100_000 });
+    const result = applyProductLifecycle(db, parts[3], parts[4], {
+      actorUserId: admin?.id || null,
+      requestId: getRequestId(req),
+      scheduledAt: body.scheduledAt || body.scheduleAt || body.publishAt || null,
+    });
+    writeAuditLog({
+      req,
+      actorUserId: admin?.id || null,
+      action: `product.lifecycle.${parts[4]}`,
+      targetType: "product",
+      targetId: result.product.id,
+      beforeState: null,
+      afterState: {
+        lifecycle: result.lifecycle,
+        version: result.product.version,
+        scheduledAt: result.product.scheduledAt || null,
+      },
+    });
+    await saveDatabase();
+    return send(res, 200, { ok: true, data: result });
   }
 
   if (pathname === "/api/admin/products/classification/review" && method === "GET") {
@@ -1106,6 +1679,13 @@ async function handleAdminRoute(req, res, url, pathname, parts, admin) {
     db.products.splice(index, 1);
     db.categoryAssignments = (db.categoryAssignments || []).filter((assignment) => assignment.productId !== deletedId);
     db.reviewTasks = (db.reviewTasks || []).filter((task) => task.productId !== deletedId);
+    const deletedVariantIds = new Set((db.productVariants || []).filter((variant) => variant.productId === deletedId).map((variant) => variant.id));
+    db.productVariants = (db.productVariants || []).filter((variant) => variant.productId !== deletedId);
+    db.variantPrices = (db.variantPrices || []).filter((price) => !deletedVariantIds.has(price.variantId));
+    db.inventoryLevels = (db.inventoryLevels || []).filter((level) => !deletedVariantIds.has(level.variantId));
+    db.productChannelListings = (db.productChannelListings || []).filter((listing) => listing.productId !== deletedId);
+    db.productMedia = (db.productMedia || []).filter((media) => media.productId !== deletedId);
+    db.searchIndexDocuments = (db.searchIndexDocuments || []).filter((document) => document.productId !== deletedId);
     db.meta.updatedAt = new Date().toISOString();
     await saveDatabase();
     return send(res, 200, { ok: true, data: { deleted: true } });
@@ -1193,6 +1773,16 @@ function migrateDatabase(existing) {
     mediaAssets: Array.isArray(existing.mediaAssets) ? existing.mediaAssets : [],
     productMedia: Array.isArray(existing.productMedia) ? existing.productMedia : [],
     importEvents: Array.isArray(existing.importEvents) ? existing.importEvents : [],
+    productVariants: Array.isArray(existing.productVariants) ? existing.productVariants : [],
+    variantPrices: Array.isArray(existing.variantPrices) ? existing.variantPrices : [],
+    inventoryLocations: Array.isArray(existing.inventoryLocations) ? existing.inventoryLocations : [],
+    inventoryLevels: Array.isArray(existing.inventoryLevels) ? existing.inventoryLevels : [],
+    productChannelListings: Array.isArray(existing.productChannelListings) ? existing.productChannelListings : [],
+    productRevisions: Array.isArray(existing.productRevisions) ? existing.productRevisions : [],
+    approvalRequests: Array.isArray(existing.approvalRequests) ? existing.approvalRequests : [],
+    outboxEvents: Array.isArray(existing.outboxEvents) ? existing.outboxEvents : [],
+    searchIndexDocuments: Array.isArray(existing.searchIndexDocuments) ? existing.searchIndexDocuments : [],
+    inventoryMovements: Array.isArray(existing.inventoryMovements) ? existing.inventoryMovements : [],
   };
 
   for (const product of next.products) {
@@ -1292,6 +1882,7 @@ function migrateDatabase(existing) {
   }
 
   next.categoryAssignments = upsertCategoryAssignments(next.categoryAssignments, next.products.map((product) => product.categoryAssignment));
+  backfillProductPlatform(next, { now: next.meta.updatedAt || new Date().toISOString() });
 
   for (const user of next.users) {
     normalizeUserRecord(user);
@@ -1400,11 +1991,23 @@ async function createSeedDatabase() {
     mediaAssets: [],
     productMedia: [],
     importEvents: [],
+    productVariants: [],
+    variantPrices: [],
+    inventoryLocations: [],
+    inventoryLevels: [],
+    productChannelListings: [],
+    productRevisions: [],
+    approvalRequests: [],
+    outboxEvents: [],
+    searchIndexDocuments: [],
+    inventoryMovements: [],
   };
   seeded.users.forEach((user) => ensureAccountRelations(seeded, user));
   seeded.addresses = seeded.customerAddresses;
   seeded.userAddresses = seeded.customerAddresses;
   seeded.auditEvents = seeded.auditLogs;
+  ensureProductPlatformCollections(seeded, { now: new Date(now).toISOString() });
+  backfillProductPlatform(seeded, { now: new Date(now).toISOString() });
   return seeded;
 }
 
@@ -1510,6 +2113,7 @@ function normalizeProduct(product, index, now) {
     currency: "IQD",
     image: product.image || "",
     gallery: Array.isArray(product.gallery) ? product.gallery : product.image ? [product.image] : [],
+    descriptionBlocks: normalizeDescriptionBlocks(product.descriptionBlocks || []),
     storedBadge: product.badge || null,
     badge: product.badge || null,
     features: cleanFeatures,
@@ -1790,6 +2394,260 @@ function withDerivedProduct(product) {
   };
 }
 
+function withPublicInventoryProduct(product) {
+  const derived = withDerivedProduct(product);
+  const publicStock = getPublicInventoryDisplay({
+    availableQuantity: derived.stock,
+    inStock: derived.inStock,
+    availabilityStatus: derived.availabilityStatus,
+  });
+
+  return {
+    id: derived.id,
+    slug: derived.slug,
+    name: derived.name,
+    brand: derived.brand,
+    category: derived.category,
+    subCategories: derived.subCategories,
+    tagline: derived.tagline,
+    price: derived.price,
+    priceUsd: derived.priceUsd,
+    compareAt: derived.compareAt,
+    compareAtUsd: derived.compareAtUsd,
+    officialPrice: derived.officialPrice,
+    officialPriceUsd: derived.officialPriceUsd,
+    currency: derived.currency || "IQD",
+    image: derived.image,
+    gallery: Array.isArray(derived.gallery) ? derived.gallery : [],
+    productPage: publicProductPageContent(derived.productPage),
+    descriptionBlocks: publicDescriptionBlocks(derived.descriptionBlocks),
+    badge: derived.badge || null,
+    features: Array.isArray(derived.features) ? derived.features : [],
+    specs: Array.isArray(derived.specs) ? derived.specs : [],
+    inStock: Boolean(derived.inStock),
+    availabilityStatus: derived.availabilityStatus,
+    tags: Array.isArray(derived.tags) ? derived.tags : [],
+    sales: Number(derived.sales || 0),
+    isNewArrival: Boolean(derived.isNewArrival),
+    createdAt: derived.createdAt || "",
+    updatedAt: derived.updatedAt || "",
+    publicStock,
+  };
+}
+
+function getPublicProductRecommendations(product, { lang = "en" } = {}) {
+  const source = withDerivedProduct(product);
+  const blocked = new Set(
+    normalizeProductRelationships(source.relationships || source.productRelationships || [])
+      .filter((relationship) => relationship.active !== false && relationship.relationshipType === "blocked")
+      .map((relationship) => relationship.targetProductId),
+  );
+  const candidates = db.products
+    .filter((item) => item.id !== source.id)
+    .filter((item) => !blocked.has(item.id))
+    .filter(isStorefrontVisibleProduct)
+    .map(withDerivedProduct)
+    .filter((item) => item.inStock !== false && item.price);
+
+  const manual = normalizeProductRelationships(source.relationships || source.productRelationships || [])
+    .filter((relationship) => relationship.active !== false && relationship.relationshipType !== "blocked")
+    .map((relationship) => {
+      const target = candidates.find((item) => item.id === relationship.targetProductId);
+      if (!target) return null;
+      return {
+        product: target,
+        recommendation_type: relationship.relationshipType,
+        score: 100 + Number(relationship.priority || 0),
+        confidence: relationship.confidence ?? 0.96,
+        reason: relationship.reason || publicRecommendationReason(relationship.relationshipType, lang),
+        signals: ["manual_relationship", relationship.relationshipType],
+      };
+    })
+    .filter(Boolean);
+
+  const automatic = candidates.flatMap((candidate) => scorePublicRecommendation(source, candidate, lang));
+  const deduped = dedupePublicRecommendations([...manual, ...automatic]);
+  const sections = [
+    ["recommended_accessories", lang === "ar" ? "ملحقات مناسبة" : "Recommended accessories", "accessory", 4],
+    ["compatible_with", lang === "ar" ? "يعمل جيداً مع" : "Works well with", "compatible", 4],
+    ["similar_products", lang === "ar" ? "منتجات مشابهة" : "Similar products", "similar", 6],
+    ["alternatives", lang === "ar" ? "بدائل قريبة" : "Alternatives", "alternative", 4],
+    ["same_brand", lang === "ar" ? "من نفس البراند" : "More from this brand", "same_brand", 4],
+  ].map(([type, title, recommendationType, limit]) => ({
+    type,
+    title,
+    items: deduped
+      .filter((item) => item.recommendation_type === recommendationType)
+      .sort((a, b) => b.score - a.score || b.confidence - a.confidence)
+      .slice(0, Number(limit))
+      .map((item) => ({
+        product: withPublicInventoryProduct(item.product),
+        recommendation_type: item.recommendation_type,
+        score: item.score,
+        confidence: Number(item.confidence.toFixed(2)),
+        reason: item.reason,
+      })),
+  })).filter((section) => section.items.length);
+
+  return { product_id: source.id, sections };
+}
+
+function scorePublicRecommendation(source, target, lang) {
+  const sourceCategory = normalizeProductCategory(source);
+  const targetCategory = normalizeProductCategory(target);
+  const sourceText = recommendationText(source);
+  const targetText = recommendationText(target);
+  const shared = [...recommendationTerms(source)].filter((term) => recommendationTerms(target).has(term));
+  const results = [];
+
+  if (targetCategory === "accessories") {
+    const sourceConnector = recommendationConnector(sourceText);
+    const targetConnector = recommendationConnector(targetText);
+    if (sourceCategory === "iems" && /\b(ear-?tips?|eartips?)\b/.test(targetText)) {
+      results.push(publicRecommendation(target, "accessory", 94, 0.94, lang === "ar" ? "يساعد على ضبط الراحة والعزل لسماعات IEM." : "Helps tune fit and isolation for IEMs.", ["iem_eartips"]));
+    } else if ((sourceCategory === "iems" || sourceCategory === "headphones") && sourceConnector && sourceConnector === targetConnector) {
+      results.push(publicRecommendation(target, "accessory", 90, 0.88, lang === "ar" ? `كيبل متوافق مع موصل ${sourceConnector}.` : `Cable match for ${sourceConnector} connectors.`, ["connector_match"]));
+    } else if (sourceCategory === "mic" && /\bxlr\b/.test(sourceText) && /\bxlr\b/.test(targetText)) {
+      results.push(publicRecommendation(target, "accessory", 96, 0.95, lang === "ar" ? "كيبل XLR مطلوب لهذا المايك." : "XLR cable for this microphone.", ["xlr_mic", "xlr_cable"]));
+    }
+  }
+
+  if ((sourceCategory === "headphones" || sourceCategory === "iems") && targetCategory === "dac") {
+    const hardToDrive = /\b(planar|open-back|he6|hard to drive|83\.5|high impedance)\b/.test(sourceText);
+    if (sourceCategory === "headphones" && hardToDrive) {
+      results.push(publicRecommendation(target, "compatible", 92, 0.88, lang === "ar" ? "مناسب لسماعات تحتاج قدرة وتحكم أفضل." : "Suitable for headphones that need more power and control.", ["power_need", "dac_amp"]));
+    } else if (sourceCategory === "iems" && /\b(portable|dongle|usb-c|3\.5|4\.4)\b/.test(targetText)) {
+      results.push(publicRecommendation(target, "compatible", 82, 0.78, lang === "ar" ? "مصدر محمول مناسب للاستماع اليومي مع IEM." : "Portable source for everyday IEM listening.", ["portable_listening"]));
+    }
+  }
+
+  if (sourceCategory === "mic" && targetCategory === "audio-interface" && /\bxlr\b/.test(sourceText) && !/\busb\b/.test(sourceText)) {
+    results.push(publicRecommendation(target, "compatible", 98, 0.96, lang === "ar" ? "مايك XLR يحتاج كرت صوت مناسب." : "XLR microphone requires an audio interface.", ["xlr_mic_requires_interface"]));
+  }
+
+  if (sourceCategory === targetCategory && targetCategory !== "accessories") {
+    const tierDistance = Math.abs(publicPriceTier(source) - publicPriceTier(target));
+    if (shared.length >= 2 || (recommendationBackType(sourceText) && recommendationBackType(sourceText) === recommendationBackType(targetText))) {
+      results.push(publicRecommendation(target, "similar", 72 + shared.length * 7 - tierDistance * 5, 0.7 + shared.length * 0.05, lang === "ar" ? "خيار قريب في نفس الفئة والاستخدام." : "A close option in the same category and use case.", ["same_category", ...shared.slice(0, 3)]));
+    }
+    if (source.inStock === false || (shared.length >= 2 && tierDistance <= 1)) {
+      results.push(publicRecommendation(target, "alternative", 76 + shared.length * 5 - tierDistance * 5, 0.72 + shared.length * 0.04, lang === "ar" ? "بديل قريب بنفس الفئة والسعر." : "A nearby alternative in the same lane.", ["alternative", ...shared.slice(0, 3)]));
+    }
+  }
+
+  if (source.brand && target.brand && sameKey(source.brand, target.brand) && sourceCategory === targetCategory && shared.length) {
+    results.push(publicRecommendation(target, "same_brand", 78 + shared.length * 4, 0.76 + shared.length * 0.03, lang === "ar" ? "من نفس البراند وبسياق قريب." : "Same brand, related use case.", ["same_brand", "same_category"]));
+  }
+
+  return results.filter((item) => item.confidence >= 0.7 && item.score >= 70);
+}
+
+function publicRecommendation(product, type, score, confidence, reason, signals) {
+  return { product, recommendation_type: type, score, confidence, reason, signals };
+}
+
+function dedupePublicRecommendations(items) {
+  const priority = { accessory: 5, compatible: 4, similar: 3, alternative: 2, same_brand: 1 };
+  const byProduct = new Map();
+  for (const item of items) {
+    const existing = byProduct.get(item.product.id);
+    if (!existing || item.score + priority[item.recommendation_type] > existing.score + priority[existing.recommendation_type]) {
+      byProduct.set(item.product.id, item);
+    }
+  }
+  return [...byProduct.values()];
+}
+
+function publicRecommendationReason(type, lang) {
+  if (type === "accessory") return lang === "ar" ? "ملحق محدد يدوياً لهذا المنتج." : "Manually selected accessory.";
+  if (type === "compatible") return lang === "ar" ? "منتج متوافق محدد يدوياً." : "Manually selected compatible product.";
+  if (type === "alternative") return lang === "ar" ? "بديل محدد يدوياً." : "Manually selected alternative.";
+  if (type === "same_brand") return lang === "ar" ? "منتج قريب من نفس البراند." : "Related product from the same brand.";
+  return lang === "ar" ? "منتج مشابه محدد يدوياً." : "Manually selected similar product.";
+}
+
+function recommendationText(product) {
+  return [
+    product.brand,
+    product.category,
+    ...(product.subCategories || []),
+    product.name?.en,
+    product.name?.ar,
+    product.tagline?.en,
+    product.tagline?.ar,
+    ...(product.features || []),
+    ...(product.tags || []),
+    ...(product.specs || []).flatMap((spec) => [
+      typeof spec.label === "string" ? spec.label : spec.label?.en || spec.label?.ar || "",
+      spec.value || "",
+    ]),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function recommendationTerms(product) {
+  return new Set(recommendationText(product).split(/[^a-z0-9\u0600-\u06ff.]+/i).map(slugify).filter((term) => term.length > 2));
+}
+
+function recommendationConnector(text) {
+  if (/\bmmcx\b/.test(text)) return "mmcx";
+  if (/\b(?:2[\s-]*pin|0\.78|0\.75|qdc)\b/.test(text)) return "2-pin";
+  if (/\bxlr\b/.test(text)) return "xlr";
+  if (/\btrs\b/.test(text)) return "trs";
+  if (/\b4\.4\s*mm|balanced\b/.test(text)) return "4.4mm";
+  if (/\b3\.5\s*mm|single-ended\b/.test(text)) return "3.5mm";
+  return "";
+}
+
+function recommendationBackType(text) {
+  if (/\bopen[-\s]?back\b/.test(text)) return "open-back";
+  if (/\bclosed[-\s]?back\b/.test(text)) return "closed-back";
+  return "";
+}
+
+function publicPriceTier(product) {
+  const price = Number(product.price || 0);
+  if (price < 75000) return 0;
+  if (price < 250000) return 1;
+  if (price < 700000) return 2;
+  return 3;
+}
+
+function getPublicInventoryDisplay({ availableQuantity, inStock, availabilityStatus }) {
+  const status = normalizePublicAvailability(availabilityStatus);
+  const quantity = Number.isFinite(Number(availableQuantity)) ? Math.max(0, Math.floor(Number(availableQuantity))) : null;
+  const isAvailable = status === "in_stock" || (!status && (inStock === true || Number(quantity || 0) > 0));
+
+  if (status === "pre_order") return publicInventoryResult("pre_order", "Pre-order", false, null, "neutral");
+  if (status === "discontinued") return publicInventoryResult("discontinued", "Discontinued", false, null, "danger");
+  if (!isAvailable || status === "out_of_stock" || quantity === 0) {
+    return publicInventoryResult("out_of_stock", "Out of stock", false, null, "danger");
+  }
+  if (quantity !== null && quantity <= 3) {
+    return publicInventoryResult("in_stock", `Only ${quantity} left`, true, quantity, "warning");
+  }
+  return publicInventoryResult("in_stock", "In stock", false, null, "success");
+}
+
+function normalizePublicAvailability(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "in_stock" || normalized === "in-stock") return "in_stock";
+  if (normalized === "out_of_stock" || normalized === "out-of-stock" || normalized === "sold_out") return "out_of_stock";
+  if (normalized === "pre_order" || normalized === "pre-order" || normalized === "preorder") return "pre_order";
+  if (normalized === "discontinued") return "discontinued";
+  if (normalized === "hidden") return "hidden";
+  return null;
+}
+
+function publicInventoryResult(availability, stockDisplay, lowStock, lowStockQuantity, severity) {
+  return {
+    availability,
+    stock_display: stockDisplay,
+    low_stock: lowStock,
+    low_stock_quantity: lowStockQuantity,
+    severity,
+  };
+}
+
 function createSampleOrders(products, customerId, now) {
   const statuses = ["pending", "confirmed", "shipped", "delivered", "cancelled"];
   return products.slice(0, 10).map((product, index) => {
@@ -1869,6 +2727,7 @@ function normalizeUserRecord(user) {
   user.avatarUrl = String(user.avatarUrl || "");
   user.role = ["customer", "admin", "super_admin"].includes(user.role) ? user.role : "customer";
   user.banned = Boolean(user.banned);
+  user.passwordLoginDisabled = Boolean(user.passwordLoginDisabled);
   user.status = user.status || (user.banned ? "disabled" : "active");
   if (!["active", "unverified", "disabled", "deleted"].includes(user.status)) user.status = user.banned ? "disabled" : "active";
   if (user.status === "disabled") user.banned = true;
@@ -1924,7 +2783,7 @@ function ensureAccountRelations(database, user) {
     });
   }
 
-  if (!database.authPasswords.some((item) => item.userId === user.id) && user.passwordHash && user.passwordSalt) {
+  if (!user.passwordLoginDisabled && !database.authPasswords.some((item) => item.userId === user.id) && user.passwordHash && user.passwordSalt) {
     database.authPasswords.push({
       id: `apw_${crypto.randomUUID()}`,
       userId: user.id,
@@ -1935,7 +2794,7 @@ function ensureAccountRelations(database, user) {
     });
   }
 
-  if (!database.authIdentities.some((item) => item.userId === user.id && item.provider === "password")) {
+  if (!user.passwordLoginDisabled && !database.authIdentities.some((item) => item.userId === user.id && item.provider === "password")) {
     database.authIdentities.push({
       id: `aid_${crypto.randomUUID()}`,
       userId: user.id,
@@ -2162,6 +3021,27 @@ function serializeImportJob(jobId) {
     candidates: (db.assetCandidates || []).filter((item) => item.importJobId === jobId || item.provenance?.importJobId === jobId),
     events: (db.importEvents || []).filter((item) => item.jobId === jobId).slice(0, 200),
   };
+}
+
+async function readWooCommerceImportCsv(body = {}) {
+  if (typeof body.csv === "string" && body.csv.trim()) {
+    if (Buffer.byteLength(body.csv, "utf8") > 24_000_000) {
+      throw new ApiError(413, "payload_too_large", "WooCommerce CSV is too large for dry-run analysis.");
+    }
+    return body.csv;
+  }
+  const filePath = String(body.filePath || body.file_path || "").trim();
+  if (!filePath) {
+    throw new ApiError(400, "validation_error", "Provide csv text or filePath for WooCommerce dry-run analysis.");
+  }
+  if (!path.isAbsolute(filePath) || path.extname(filePath).toLowerCase() !== ".csv") {
+    throw new ApiError(400, "validation_error", "WooCommerce filePath must be an absolute .csv path.");
+  }
+  const fileStat = await stat(filePath);
+  if (fileStat.size > 24_000_000) {
+    throw new ApiError(413, "payload_too_large", "WooCommerce CSV is too large for dry-run analysis.");
+  }
+  return readFile(filePath, "utf8");
 }
 
 function registerMediaAsset(asset) {
@@ -3020,7 +3900,7 @@ async function undoAdminBulkAction(logId) {
   return { restoredIds, log };
 }
 
-function filterProducts(products, searchParams) {
+function filterProducts(products, searchParams, options = {}) {
   const query = (searchParams.get("q") || searchParams.get("search") || "").trim().toLowerCase();
   const category = searchParams.get("category") || searchParams.get("cat");
   const categoryTerm = searchParams.get("subcategory") || searchParams.get("term") || searchParams.get("f");
@@ -3032,7 +3912,9 @@ function filterProducts(products, searchParams) {
   const max = Number(searchParams.get("max") || searchParams.get("maxPrice") || 0);
   const sort = searchParams.get("sort") || "featured";
 
-  let result = [...products].map(withDerivedProduct);
+  let result = [...products]
+    .filter((product) => options.includeUnpublished || isStorefrontVisibleProduct(product))
+    .map(withDerivedProduct);
 
   if (query) {
     result = result.filter((product) => {
@@ -3126,18 +4008,20 @@ function getCollection(rawSlug, searchParams) {
   const definition = resolveCollection(rawSlug);
   if (!definition) throw new ApiError(404, "not_found", "Collection not found");
   const products = collectProducts(definition, searchParams);
+  const result = paginate(products, searchParams);
   return {
     slug: definition.slug,
     title: definition.title,
     description: definition.description,
     sort: searchParams.get("sort") || definition.sort,
-    ...paginate(products, searchParams),
+    ...result,
+    items: result.items.map(withPublicInventoryProduct),
   };
 }
 
 function listBrands() {
   const seen = new Map();
-  for (const product of db.products) {
+  for (const product of db.products.filter(isStorefrontVisibleProduct)) {
     const key = keyify(product.brand);
     if (HIDDEN_BRAND_KEYS.has(key)) continue;
     if (!seen.has(key)) {
@@ -3164,21 +4048,21 @@ function getBrand(value) {
   const key = keyify(value);
   const brand = listBrands().find((item) => item.key === key || item.slug === value);
   if (!brand) return null;
-  const products = db.products.filter((product) => sameKey(product.brand, brand.name)).map(withDerivedProduct);
+  const products = db.products.filter((product) => isStorefrontVisibleProduct(product) && sameKey(product.brand, brand.name)).map(withDerivedProduct);
   return {
     ...brand,
     description: `${brand.name} products available at EDIO, curated from the pieces we currently carry.`,
-    products: sortProducts(products, "newest"),
+    products: sortProducts(products, "newest").map(withPublicInventoryProduct),
   };
 }
 
 function withCategoryCounts(category) {
   return {
     ...category,
-    productCount: db.products.filter((product) => normalizeProductCategory(product) === category.slug).length,
+    productCount: db.products.filter((product) => isStorefrontVisibleProduct(product) && normalizeProductCategory(product) === category.slug).length,
     terms: flattenCategoryTerms(category.slug, false).map((term) => ({
       slug: term.slug,
-      productCount: db.products.filter((product) => productMatchesCategoryTerm(product, category.slug, term.slug)).length,
+      productCount: db.products.filter((product) => isStorefrontVisibleProduct(product) && productMatchesCategoryTerm(product, category.slug, term.slug)).length,
     })),
   };
 }
@@ -3306,7 +4190,14 @@ async function register(body, req) {
 async function signup(body, req) {
   const payload = validateRegistrationBody(body, { minPasswordLength: 6 });
   if (db.users.some((user) => user.emailCanonical === payload.emailCanonical || user.email === payload.emailCanonical)) {
-    throw new ApiError(409, "email_exists", "Email is already registered");
+    writeAuditLog({
+      req,
+      action: "auth.signup.duplicate",
+      targetType: "user",
+      afterState: { emailCanonical: payload.emailCanonical },
+    });
+    await saveDatabase();
+    return null;
   }
 
   const user = createUserRecord(payload, { emailVerified: false, status: "unverified" });
@@ -3375,7 +4266,154 @@ async function login(body, req) {
   return user;
 }
 
+async function completeOAuthLogin(provider, params, req) {
+  if (params.error) {
+    throw new ApiError(400, "provider_error", "The sign-in provider could not complete authentication.");
+  }
+  const code = requireString(params.code, "code");
+  const state = requireString(params.state, "state");
+  const storedState = consumeOAuthState({
+    cookieValue: getCookieValue(req, OAUTH_STATE_COOKIE),
+    provider,
+    state,
+    secret: JWT_SECRET,
+  });
+  if (!storedState) throw new ApiError(400, "invalid_state", "Sign-in session expired. Try again.");
+  const config = getOAuthProviderConfig(provider, process.env, getPublicBaseUrl(req));
+  if (!config) throw new ApiError(503, "provider_not_configured", "This sign-in provider is not configured yet.");
+
+  const tokenSet = await exchangeOAuthCode(config, code);
+  const claims = await verifyOAuthIdToken(tokenSet.id_token, config, storedState.nonce);
+  const profile = normalizeProviderProfile(provider, claims, params.user);
+  const user = await findOrCreateOAuthUser(profile, req);
+  user.lastLoginAt = new Date().toISOString();
+  user.updatedAt = user.lastLoginAt;
+  writeAuditLog({
+    req,
+    actorUserId: user.id,
+    action: "auth.oauth.login.success",
+    targetType: "user",
+    targetId: user.id,
+    afterState: { provider, identityLinked: true },
+  });
+  await saveDatabase();
+  return { user, redirectTo: storedState.redirectTo };
+}
+
+async function findOrCreateOAuthUser(profile, req) {
+  if (!profile.providerAccountId) throw new ApiError(400, "provider_error", "Provider account is missing.");
+  const existingIdentity = db.authIdentities.find(
+    (identity) =>
+      identity.provider === profile.provider &&
+      identity.providerUserId === profile.providerAccountId &&
+      !identity.revokedAt,
+  );
+  if (existingIdentity) {
+    const user = db.users.find((item) => item.id === existingIdentity.userId);
+    if (!user || isUserDisabled(user)) throw new ApiError(403, "user_disabled", "This user is disabled");
+    updateOAuthIdentity(existingIdentity, profile);
+    return user;
+  }
+
+  if (!profile.email || !isValidEmail(profile.email)) {
+    throw new ApiError(400, "email_missing", "The sign-in provider did not return a usable email.");
+  }
+  if (!profile.emailVerified) {
+    throw new ApiError(409, "account_link_conflict", "The sign-in provider did not verify this email.");
+  }
+
+  let user = db.users.find((item) => item.emailCanonical === profile.email || item.email === profile.email);
+  if (user) {
+    if (isUserDisabled(user)) throw new ApiError(403, "user_disabled", "This user is disabled");
+    if (!user.emailVerified) {
+      user.emailVerified = true;
+      if (user.status === "unverified") user.status = "active";
+    }
+    if (!user.avatarUrl && profile.avatarUrl) user.avatarUrl = profile.avatarUrl;
+    if ((!user.fullName || user.fullName === user.email) && profile.fullName) user.fullName = profile.fullName;
+    user.updatedAt = new Date().toISOString();
+  } else {
+    user = createOAuthUserRecord(profile);
+    db.users.push(user);
+  }
+
+  ensureAccountRelations(db, user);
+  linkOAuthIdentity(user, profile);
+  syncCustomerProfileFromUser(user);
+  writeAuditLog({
+    req,
+    actorUserId: user.id,
+    action: "auth.oauth.identity.linked",
+    targetType: "user",
+    targetId: user.id,
+    afterState: { provider: profile.provider, email: profile.email, role: user.role },
+  });
+  return user;
+}
+
+function createOAuthUserRecord(profile) {
+  const now = new Date().toISOString();
+  return normalizeUserRecord({
+    id: `usr_${crypto.randomUUID()}`,
+    email: profile.email,
+    emailCanonical: profile.email,
+    emailVerified: true,
+    fullName: profile.fullName || profile.email.split("@")[0],
+    phone: "",
+    phoneE164: "",
+    avatarUrl: profile.avatarUrl || "",
+    role: "customer",
+    status: "active",
+    banned: false,
+    locale: "en",
+    currency: "IQD",
+    lastLoginAt: null,
+    deletedAt: null,
+    passwordLoginDisabled: true,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function linkOAuthIdentity(user, profile) {
+  const existing = db.authIdentities.find(
+    (identity) =>
+      identity.userId === user.id &&
+      identity.provider === profile.provider &&
+      identity.providerUserId === profile.providerAccountId,
+  );
+  if (existing) {
+    updateOAuthIdentity(existing, profile);
+    return existing;
+  }
+  const now = new Date().toISOString();
+  const identity = {
+    id: `aid_${crypto.randomUUID()}`,
+    userId: user.id,
+    provider: profile.provider,
+    providerUserId: profile.providerAccountId,
+    label: `${profile.provider === "google" ? "Google" : "Apple"} login`,
+    email: profile.email,
+    emailVerified: profile.emailVerified,
+    avatarUrl: profile.avatarUrl || "",
+    createdAt: now,
+    updatedAt: now,
+    revokedAt: null,
+  };
+  db.authIdentities.push(identity);
+  return identity;
+}
+
+function updateOAuthIdentity(identity, profile) {
+  identity.email = profile.email || identity.email || "";
+  identity.emailVerified = Boolean(profile.emailVerified || identity.emailVerified);
+  identity.avatarUrl = profile.avatarUrl || identity.avatarUrl || "";
+  identity.updatedAt = new Date().toISOString();
+  return identity;
+}
+
 async function updateUserProfile(userId, body, req) {
+  assertNoForbiddenFields(body);
   const user = db.users.find((item) => item.id === userId);
   if (!user) throw new ApiError(404, "not_found", "User not found");
   const before = publicUser(user);
@@ -3406,11 +4444,11 @@ async function updateUserProfile(userId, body, req) {
     });
     await issueEmailVerificationToken(user, req);
   }
-  if (body.fullName !== undefined) user.fullName = requireString(body.fullName, "fullName");
-  if (body.phone !== undefined) user.phone = String(body.phone || "");
-  if (body.phoneE164 !== undefined) user.phoneE164 = String(body.phoneE164 || "");
-  if (body.avatarUrl !== undefined) user.avatarUrl = String(body.avatarUrl || "");
-  if (body.locale !== undefined) user.locale = String(body.locale || "en");
+  if (body.fullName !== undefined) user.fullName = requireCleanString(body.fullName, "fullName", 120);
+  if (body.phone !== undefined) user.phone = sanitizePlainText(body.phone, { max: 40 });
+  if (body.phoneE164 !== undefined) user.phoneE164 = sanitizePlainText(body.phoneE164, { max: 40 });
+  if (body.avatarUrl !== undefined) user.avatarUrl = sanitizePlainText(body.avatarUrl, { max: 500 });
+  if (body.locale !== undefined) user.locale = sanitizePlainText(body.locale || "en", { max: 12 });
   if (body.currency !== undefined && SUPPORTED_CURRENCIES.includes(body.currency)) user.currency = body.currency;
   if (body.password !== undefined) {
     requireRecentPassword(user, body.currentPassword);
@@ -3511,8 +4549,20 @@ function getCustomerProfile(userId) {
 function listUserAuthIdentities(userId) {
   const hasPassword = db.authPasswords.some((item) => item.userId === userId);
   const passkeys = db.authPasskeys.filter((item) => item.userId === userId && !item.revokedAt);
+  const oauthIdentities = db.authIdentities.filter(
+    (item) => item.userId === userId && ["google", "apple"].includes(item.provider) && !item.revokedAt,
+  );
   return [
     ...(hasPassword ? [{ type: "password", label: "Email and password", enabled: true }] : []),
+    ...oauthIdentities.map((identity) => ({
+      type: "oauth",
+      provider: identity.provider,
+      id: identity.id,
+      label: identity.label || `${identity.provider} login`,
+      email: identity.email || null,
+      createdAt: identity.createdAt,
+      lastUsedAt: identity.updatedAt || null,
+    })),
     ...passkeys.map((passkey) => ({
       type: "passkey",
       id: passkey.id,
@@ -3553,8 +4603,9 @@ function recordUserConsent(userId, body, req) {
 }
 
 function validateRegistrationBody(body, options = {}) {
+  assertNoForbiddenFields(body);
   const email = normalizeEmail(body.email);
-  const fullName = String(body.fullName || body.firstName || body.name || email.split("@")[0] || "").trim();
+  const fullName = sanitizePlainText(body.fullName || body.firstName || body.name || email.split("@")[0] || "", { max: 120 });
   const password = requireString(body.password, "password");
   if (!isValidEmail(email)) throw new ApiError(400, "validation_error", "A valid email is required");
   if (!fullName) throw new ApiError(400, "validation_error", "A name or email is required");
@@ -3564,10 +4615,10 @@ function validateRegistrationBody(body, options = {}) {
     emailCanonical: email,
     fullName,
     password,
-    phone: String(body.phone || ""),
-    phoneE164: String(body.phoneE164 || (String(body.phone || "").startsWith("+") ? body.phone : "")),
-    avatarUrl: String(body.avatarUrl || ""),
-    locale: String(body.locale || "en"),
+    phone: sanitizePlainText(body.phone || "", { max: 40 }),
+    phoneE164: sanitizePlainText(body.phoneE164 || (String(body.phone || "").startsWith("+") ? body.phone : ""), { max: 40 }),
+    avatarUrl: sanitizePlainText(body.avatarUrl || "", { max: 500 }),
+    locale: sanitizePlainText(body.locale || "en", { max: 12 }),
     currency: SUPPORTED_CURRENCIES.includes(body.currency) ? body.currency : "IQD",
   };
 }
@@ -3766,7 +4817,7 @@ function enrichCart(cart) {
   const afterDiscount = Math.max(0, subtotal - discount);
   const shipping = afterDiscount >= FREE_SHIPPING_THRESHOLD ? 0 : SHIPPING_FEE;
   return {
-    items,
+    items: items.map((item) => ({ ...item, product: withPublicInventoryProduct(item.product) })),
     coupon: couponResult?.ok ? couponResult.coupon : null,
     subtotal,
     discount,
@@ -3812,18 +4863,20 @@ function calculateDiscount(coupon, subtotal) {
 }
 
 async function createOrder(body, user) {
+  assertNoForbiddenFields(body);
   const items = normalizeCartItems(body.items || []);
   if (!items.length) throw new ApiError(400, "validation_error", "Order requires at least one valid item");
 
   const customer = body.customer || {};
-  const fullName = user?.fullName || [customer.firstName, customer.lastName].filter(Boolean).join(" ") || customer.fullName || customer.name;
+  const fullName = sanitizePlainText(user?.fullName || [customer.firstName, customer.lastName].filter(Boolean).join(" ") || customer.fullName || customer.name, { max: 120 });
   const email = user?.email || normalizeEmail(customer.email);
-  const phone = user?.phone || customer.phone;
+  const phone = sanitizePlainText(user?.phone || customer.phone, { max: 40 });
   if (!fullName) throw new ApiError(400, "validation_error", "Customer name is required");
   if (!email) throw new ApiError(400, "validation_error", "Customer email is required");
   if (!phone) throw new ApiError(400, "validation_error", "Customer phone is required");
 
   const shippingAddress = normalizeShippingAddress(body.shippingAddress || customer);
+  assertCartInventoryAvailable(items);
   const subtotal = items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   const couponResult = body.couponCode ? validateCoupon(body.couponCode, subtotal) : null;
   const discount = couponResult?.discount || 0;
@@ -3872,15 +4925,33 @@ async function createOrder(body, user) {
   return order;
 }
 
+function assertCartInventoryAvailable(items) {
+  for (const item of items) {
+    const available = Number.isFinite(Number(item.product.stock)) ? Math.max(0, Math.floor(Number(item.product.stock))) : item.product.inStock ? 99 : 0;
+    if (item.product.availabilityStatus === "pre_order") continue;
+    if (!item.product.inStock || available <= 0 || item.quantity > available) {
+      const publicStock = getPublicInventoryDisplay({
+        availableQuantity: available,
+        inStock: item.product.inStock,
+        availabilityStatus: item.product.availabilityStatus,
+      });
+      const message = publicStock.low_stock && publicStock.low_stock_quantity
+        ? `Only ${publicStock.low_stock_quantity} left.`
+        : "Requested quantity is not available right now.";
+      throw new ApiError(409, "insufficient_stock", message);
+    }
+  }
+}
+
 function normalizeShippingAddress(value) {
-  const line1 = requireString(value.line1 || value.address, "shippingAddress.line1");
-  const city = requireString(value.city, "shippingAddress.city");
-  const governorate = requireString(value.governorate || value.province || value.state, "shippingAddress.governorate");
+  const line1 = requireCleanString(value.line1 || value.address, "shippingAddress.line1", 180);
+  const city = requireCleanString(value.city, "shippingAddress.city", 80);
+  const governorate = requireCleanString(value.governorate || value.province || value.state, "shippingAddress.governorate", 80);
   return {
     line1,
     city,
     governorate,
-    notes: value.notes || "",
+    notes: sanitizePlainText(value.notes || "", { max: 300 }),
   };
 }
 
@@ -3921,13 +4992,14 @@ function listUserAddresses(userId) {
 }
 
 async function createAddress(userId, body, req) {
+  assertNoForbiddenFields(body);
   const now = new Date().toISOString();
   const address = {
     id: `adr_${crypto.randomUUID()}`,
     userId,
-    label: body.label || "Address",
-    fullName: requireString(body.fullName || body.name, "fullName"),
-    phone: requireString(body.phone, "phone"),
+    label: sanitizePlainText(body.label || "Address", { max: 80 }) || "Address",
+    fullName: requireCleanString(body.fullName || body.name, "fullName", 120),
+    phone: requireCleanString(body.phone, "phone", 40),
     ...normalizeShippingAddress(body),
     isDefault: Boolean(body.isDefault),
     createdAt: now,
@@ -3951,6 +5023,7 @@ async function createAddress(userId, body, req) {
 }
 
 async function updateAddress(userId, id, body, req) {
+  assertNoForbiddenFields(body);
   const address = db.addresses.find((item) => item.id === id && item.userId === userId);
   if (!address) throw new ApiError(404, "not_found", "Address not found");
   if (isAddressUsedForActiveOrder(userId, address)) {
@@ -3959,7 +5032,7 @@ async function updateAddress(userId, id, body, req) {
   }
   const before = { ...address };
   for (const field of ["label", "fullName", "phone", "line1", "city", "governorate", "notes"]) {
-    if (body[field] !== undefined) address[field] = String(body[field] || "");
+    if (body[field] !== undefined) address[field] = sanitizePlainText(body[field] || "", { max: field === "notes" ? 300 : 160 });
   }
   if (body.isDefault !== undefined) {
     address.isDefault = Boolean(body.isDefault);
@@ -4012,10 +5085,10 @@ function isAddressUsedForActiveOrder(userId, address) {
 }
 
 async function createProduct(body) {
-  const nameEn = requireString(body.name?.en || body.nameEn || body.name, "name.en");
-  const brand = requireString(body.brand, "brand");
+  const nameEn = requireCleanString(body.name?.en || body.nameEn || body.name, "name.en", 180);
+  const brand = requireCleanString(body.brand, "brand", 80);
   const category = requireCatalogCategory(body.category, "category");
-  const sourceUrl = body.sourceUrl ? String(body.sourceUrl).trim() : "";
+  const sourceUrl = body.sourceUrl ? sanitizePlainText(body.sourceUrl, { max: 1000 }) : "";
   const existingMatch = findExistingProductMatch({
     sourceUrl,
     brand,
@@ -4033,7 +5106,7 @@ async function createProduct(body) {
   const pricing = normalizeAdminPricing(body);
   const rawSpecs = Array.isArray(body.specs) ? body.specs : [];
   const mergedSpecs = mergeSpecs(rawSpecs, extractSpecsFromTextBlock(body.tagline?.en || body.taglineEn || ""));
-  const cleanFeatures = cleanFeatureCandidates(Array.isArray(body.features) ? body.features : []);
+  const cleanFeatures = cleanFeatureCandidates(cleanStringArray(body.features, 12, 220));
   const taglineEn = selectDisplayDescription({
     tagline: body.tagline?.en || body.taglineEn || "",
     features: cleanFeatures,
@@ -4043,14 +5116,14 @@ async function createProduct(body) {
     ? ""
     : String(body.tagline?.ar || body.taglineAr || body.tagline?.en || body.taglineEn || "").trim();
   const product = {
-    id: body.id ? String(body.id) : `prd_${crypto.randomUUID()}`,
+    id: `prd_${crypto.randomUUID()}`,
     slug: createProductSlug(body.slug || nameEn),
     sourceUrl,
-    name: { en: nameEn, ar: body.name?.ar || body.nameAr || nameEn },
+    name: { en: nameEn, ar: sanitizePlainText(body.name?.ar || body.nameAr || nameEn, { max: 180 }) || nameEn },
     brand,
     category,
-    subCategories: Array.isArray(body.subCategories) ? body.subCategories : [],
-    tagline: { en: taglineEn, ar: taglineAr },
+    subCategories: cleanStringArray(body.subCategories, 8, 80),
+    tagline: { en: sanitizePlainText(taglineEn, { max: 500 }), ar: sanitizePlainText(taglineAr, { max: 500 }) },
     price: pricing.price,
     priceUsd: pricing.priceUsd,
     compareAt: pricing.officialPrice,
@@ -4058,18 +5131,22 @@ async function createProduct(body) {
     officialPrice: pricing.officialPrice,
     officialPriceUsd: pricing.officialPriceUsd,
     currency: "IQD",
-    image: body.image || "",
-    gallery: Array.isArray(body.gallery) ? body.gallery : body.image ? [body.image] : [],
-    storedBadge: body.badge || null,
-    badge: body.badge || null,
+    image: sanitizePlainText(body.image || "", { max: 1000 }),
+    gallery: cleanStringArray(Array.isArray(body.gallery) ? body.gallery : body.image ? [body.image] : [], 20, 1000),
+    productPage: normalizeProductPageContent(body.productPage || body.product_page),
+    descriptionBlocks: normalizeDescriptionBlocks(body.descriptionBlocks || body.description_blocks || []),
+    relationships: normalizeProductRelationships(body.relationships || body.productRelationships || []),
+    productRelationships: normalizeProductRelationships(body.relationships || body.productRelationships || []),
+    storedBadge: body.badge ? normalizeEnum(body.badge, PRODUCT_BADGES, null, "badge") : null,
+    badge: body.badge ? normalizeEnum(body.badge, PRODUCT_BADGES, null, "badge") : null,
     features: cleanFeatures,
     specs: mergedSpecs,
     inStock: body.inStock !== false,
-    stock: Number(body.stock ?? 8),
+    stock: Math.max(0, Math.min(100000, Number(body.stock ?? 8))),
     sales: Number(body.sales || 0),
-    availabilityStatus: body.availabilityStatus || (body.inStock === false ? "out_of_stock" : "in_stock"),
-    status: body.status || "published",
-    tags: Array.isArray(body.tags) ? body.tags : [],
+    availabilityStatus: normalizeEnum(body.availabilityStatus || (body.inStock === false ? "out_of_stock" : "in_stock"), PRODUCT_AVAILABILITY_STATUSES, "in_stock", "availabilityStatus"),
+    status: normalizeEnum(body.status || "published", PRODUCT_STATUSES, "published", "status"),
+    tags: cleanStringArray(body.tags, 20, 60),
     needsReview: Boolean(body.needsReview),
     confidenceScore: optionalConfidence(body.confidenceScore),
     normalizedImageUrl: body.normalizedImageUrl || "",
@@ -4118,6 +5195,7 @@ async function createProduct(body) {
   db.categoryAssignments = upsertCategoryAssignments(db.categoryAssignments, [product.categoryAssignment]);
   db.products.unshift(product);
   maybeQueueProductReviewTask(product, product.importState.lastJobId);
+  backfillProductPlatform(db, { productIds: [product.id], now });
   await saveDatabase();
   return withDerivedProduct(product);
 }
@@ -4203,6 +5281,7 @@ async function duplicateProduct(value, body = {}, admin = null) {
     beforeState: { sourceProductId: source.id },
     afterState: { id: nextId, badge: nextBadge, slug: clone.slug },
   });
+  backfillProductPlatform(db, { productIds: [clone.id], now });
   await saveDatabase();
   return withDerivedProduct(clone);
 }
@@ -4261,10 +5340,10 @@ function normalizeCouponInput(body, code) {
 async function updateProduct(value, body) {
   const product = findProduct(value);
   if (!product) throw new ApiError(404, "not_found", "Product not found");
-  const nextSourceUrl = body.sourceUrl !== undefined ? String(body.sourceUrl || "").trim() : product.sourceUrl || "";
-  const nextBrand = body.brand !== undefined ? requireString(body.brand, "brand") : product.brand;
+  const nextSourceUrl = body.sourceUrl !== undefined ? sanitizePlainText(body.sourceUrl || "", { max: 1000 }) : product.sourceUrl || "";
+  const nextBrand = body.brand !== undefined ? requireCleanString(body.brand, "brand", 80) : product.brand;
   const nextCategory = body.category !== undefined ? requireCatalogCategory(body.category, "category") : product.category;
-  const nextNameEn = body.name?.en || body.nameEn || body.name || product.name?.en;
+  const nextNameEn = sanitizePlainText(body.name?.en || body.nameEn || body.name || product.name?.en, { max: 180 });
   const existingMatch = findExistingProductMatch({
     sourceUrl: nextSourceUrl,
     brand: nextBrand,
@@ -4279,21 +5358,48 @@ async function updateProduct(value, body) {
       `A matching product already exists: ${existingMatch.name?.en || existingMatch.slug || existingMatch.id}`,
     );
   }
-  for (const field of ["sourceUrl", "brand", "image"]) {
-    if (body[field] !== undefined) product[field] = body[field] || null;
-  }
+  if (body.sourceUrl !== undefined) product.sourceUrl = nextSourceUrl;
+  if (body.brand !== undefined) product.brand = nextBrand;
+  if (body.image !== undefined) product.image = sanitizePlainText(body.image || "", { max: 1000 });
   if (body.category !== undefined) product.category = nextCategory;
   if (body.badge !== undefined) {
-    product.storedBadge = body.badge || null;
+    product.storedBadge = body.badge ? normalizeEnum(body.badge, PRODUCT_BADGES, null, "badge") : null;
     product.badge = product.storedBadge;
   }
   if (body.slug !== undefined) {
     product.slug = createProductSlug(body.slug || product.name?.en || product.slug, product.id);
   }
-  if (body.name) product.name = { ...product.name, ...body.name };
-  if (body.tagline) product.tagline = { ...product.tagline, ...body.tagline };
-  if (body.subCategories) product.subCategories = Array.isArray(body.subCategories) ? body.subCategories : product.subCategories;
-  if (body.gallery) product.gallery = Array.isArray(body.gallery) ? body.gallery : product.gallery;
+  if (body.name !== undefined) {
+    if (typeof body.name === "string") {
+      product.name = { ...product.name, en: requireCleanString(body.name, "name.en", 180) };
+    } else {
+    product.name = {
+      ...product.name,
+      ...(body.name.en !== undefined ? { en: requireCleanString(body.name.en, "name.en", 180) } : {}),
+      ...(body.name.ar !== undefined ? { ar: sanitizePlainText(body.name.ar, { max: 180 }) } : {}),
+    };
+    }
+  }
+  if (body.tagline) {
+    product.tagline = {
+      ...product.tagline,
+      ...(body.tagline.en !== undefined ? { en: sanitizePlainText(body.tagline.en, { max: 500 }) } : {}),
+      ...(body.tagline.ar !== undefined ? { ar: sanitizePlainText(body.tagline.ar, { max: 500 }) } : {}),
+    };
+  }
+  if (body.subCategories) product.subCategories = cleanStringArray(body.subCategories, 8, 80);
+  if (body.gallery) product.gallery = cleanStringArray(body.gallery, 20, 1000);
+  if (body.productPage !== undefined || body.product_page !== undefined) {
+    product.productPage = normalizeProductPageContent(body.productPage || body.product_page);
+  }
+  if (body.descriptionBlocks !== undefined || body.description_blocks !== undefined) {
+    product.descriptionBlocks = normalizeDescriptionBlocks(body.descriptionBlocks || body.description_blocks || []);
+  }
+  if (body.relationships !== undefined || body.productRelationships !== undefined) {
+    const relationships = normalizeProductRelationships(body.relationships || body.productRelationships || []);
+    product.relationships = relationships;
+    product.productRelationships = relationships;
+  }
   if (body.features) product.features = cleanFeatureCandidates(Array.isArray(body.features) ? body.features : product.features);
   if (body.specs) product.specs = mergeSpecs(Array.isArray(body.specs) ? body.specs : product.specs, []);
   if (body.tagline || body.features || body.specs) {
@@ -4325,9 +5431,9 @@ async function updateProduct(value, body) {
   }
   if (body.stock !== undefined) product.stock = Math.max(0, Number(body.stock));
   if (body.inStock !== undefined) product.inStock = Boolean(body.inStock);
-  if (body.availabilityStatus !== undefined) product.availabilityStatus = String(body.availabilityStatus || "").trim();
-  if (body.status !== undefined) product.status = String(body.status || "").trim();
-  if (body.tags !== undefined) product.tags = Array.isArray(body.tags) ? body.tags : product.tags || [];
+  if (body.availabilityStatus !== undefined) product.availabilityStatus = normalizeEnum(body.availabilityStatus, PRODUCT_AVAILABILITY_STATUSES, product.availabilityStatus || "in_stock", "availabilityStatus");
+  if (body.status !== undefined) product.status = normalizeEnum(body.status, PRODUCT_STATUSES, product.status || "published", "status");
+  if (body.tags !== undefined) product.tags = cleanStringArray(body.tags, 20, 60);
   if (body.needsReview !== undefined) product.needsReview = Boolean(body.needsReview);
   if (body.confidenceScore !== undefined) product.confidenceScore = optionalConfidence(body.confidenceScore);
   if (body.normalizedImageUrl !== undefined) product.normalizedImageUrl = String(body.normalizedImageUrl || "");
@@ -4391,8 +5497,48 @@ async function updateProduct(value, body) {
     db.categoryAssignments = upsertCategoryAssignments(db.categoryAssignments, [product.categoryAssignment]);
   }
   maybeQueueProductReviewTask(product, product.importState?.lastJobId || null);
+  backfillProductPlatform(db, { productIds: [product.id], now: product.updatedAt });
   await saveDatabase();
   return withDerivedProduct(product);
+}
+
+function normalizeProductRelationships(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value
+    .map((entry) => {
+      const rawType = String(entry?.relationshipType || entry?.relationship_type || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[-\s]+/g, "_");
+      const relationshipType =
+        rawType === "recommended_accessory" || rawType === "recommended_accessories"
+          ? "accessory"
+          : rawType === "compatible_with"
+            ? "compatible"
+            : rawType === "similar_products"
+              ? "similar"
+              : rawType === "same_brand_products"
+                ? "same_brand"
+                : rawType;
+      const targetProductId = sanitizePlainText(entry?.targetProductId || entry?.target_product_id || "", { max: 120 });
+      if (!targetProductId || !PRODUCT_RELATIONSHIP_TYPES.has(relationshipType)) return null;
+      const key = `${relationshipType}:${targetProductId}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      const priority = Number(entry?.priority || 0);
+      const confidence = Number(entry?.confidence);
+      return {
+        targetProductId,
+        relationshipType,
+        reason: sanitizePlainText(entry?.reason || "", { max: 220 }),
+        priority: Number.isFinite(priority) ? Math.max(-100, Math.min(100, priority)) : 0,
+        confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : undefined,
+        active: entry?.active !== false,
+        source: ["manual", "imported", "automatic"].includes(entry?.source) ? entry.source : "manual",
+      };
+    })
+    .filter(Boolean);
 }
 
 function normalizeAdminPricing(body) {
@@ -4623,6 +5769,27 @@ function setSessionCookie(res, rawToken, expiresAt) {
   appendSetCookie(res, cookie);
 }
 
+function setOAuthStateCookie(res, value) {
+  appendSetCookie(
+    res,
+    [
+      `${OAUTH_STATE_COOKIE}=${encodeURIComponent(value)}`,
+      "Path=/api/auth/oauth",
+      "HttpOnly",
+      "SameSite=Lax",
+      "Max-Age=600",
+      AUTH_COOKIE_SECURE ? "Secure" : "",
+    ].filter(Boolean).join("; "),
+  );
+}
+
+function clearOAuthStateCookie(res) {
+  appendSetCookie(
+    res,
+    `${OAUTH_STATE_COOKIE}=; Path=/api/auth/oauth; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${AUTH_COOKIE_SECURE ? "; Secure" : ""}`,
+  );
+}
+
 function clearSessionCookie(res) {
   appendSetCookie(res, `${AUTH_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${AUTH_COOKIE_SECURE ? "; Secure" : ""}`);
 }
@@ -4675,7 +5842,34 @@ function getRequestId(req) {
   return String(req.headers["x-request-id"] || req.headers["x-correlation-id"] || `req_${crypto.randomUUID()}`);
 }
 
+function getPublicBaseUrl(req) {
+  const configured = String(process.env.PUBLIC_APP_URL || process.env.VITE_PUBLIC_APP_URL || "").trim();
+  if (configured) return configured.replace(/\/$/, "");
+  const proto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() || (AUTH_COOKIE_SECURE ? "https" : "http");
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || `127.0.0.1:${PORT}`).split(",")[0].trim();
+  return `${proto}://${host}`.replace(/\/$/, "");
+}
+
+function buildAuthRedirectUrl(req, pathValue, result, errorCode = "", redirectTo = "") {
+  const base = getPublicBaseUrl(req);
+  const path = normalizeRedirectPath(pathValue, "/login");
+  const url = new URL(path, base);
+  if (result) url.searchParams.set("auth", result);
+  if (errorCode) url.searchParams.set("error", String(errorCode).slice(0, 80));
+  if (redirectTo) url.searchParams.set("redirectTo", normalizeRedirectPath(redirectTo));
+  return url.toString();
+}
+
+function redirect(res, location, status = 302) {
+  res.writeHead(status, {
+    Location: location,
+    "Cache-Control": "no-store",
+  });
+  res.end();
+}
+
 const authRateLimits = new Map();
+const routeRateLimits = new Map();
 
 function enforceAuthRateLimit(req, key) {
   const now = Date.now();
@@ -4689,6 +5883,77 @@ function enforceAuthRateLimit(req, key) {
   authRateLimits.set(clientKey, bucket);
   if (bucket.count > AUTH_RATE_LIMIT_MAX) {
     throw new ApiError(429, "rate_limited", "Too many attempts. Try again later.");
+  }
+}
+
+function enforceRouteRateLimit(req, key, { max = 60, windowMs = GENERAL_RATE_LIMIT_WINDOW_MS } = {}) {
+  const now = Date.now();
+  const clientKey = `${hashClientIp(req)}:${key}`;
+  const bucket = routeRateLimits.get(clientKey) || { count: 0, resetAt: now + windowMs };
+  if (bucket.resetAt < now) {
+    bucket.count = 0;
+    bucket.resetAt = now + windowMs;
+  }
+  bucket.count += 1;
+  routeRateLimits.set(clientKey, bucket);
+  if (bucket.count > max) {
+    throw new ApiError(429, "rate_limited", "Too many requests. Try again later.");
+  }
+}
+
+function applyRouteRateLimits(req, pathname, method) {
+  if (method === "OPTIONS") return;
+
+  if (pathname === "/api/catalog" || pathname === "/api/products" || pathname.startsWith("/api/products/")) {
+    enforceRouteRateLimit(req, `catalog:${pathname}`, { max: 180 });
+  }
+
+  if (pathname.includes("/auth/") || pathname.startsWith("/auth/")) {
+    enforceRouteRateLimit(req, `auth:${pathname}`, { max: 30, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname.includes("/password") || pathname.includes("/register") || pathname.includes("/signup")) {
+    enforceRouteRateLimit(req, `identity:${pathname}`, { max: 12, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname.startsWith("/api/admin/products/import") || pathname.startsWith("/api/admin/products/discover")) {
+    enforceRouteRateLimit(req, "admin-product-import", { max: 20, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname.startsWith("/api/admin/products/enrichment") || pathname.startsWith("/api/admin/products/enrich")) {
+    enforceRouteRateLimit(req, "admin-product-enrichment", { max: 12, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname.startsWith("/api/admin/import/woocommerce") || pathname.startsWith("/api/admin/products/import/woocommerce")) {
+    enforceRouteRateLimit(req, "admin-woocommerce-import", { max: 12, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname.startsWith("/api/admin/import/products")) {
+    enforceRouteRateLimit(req, "admin-product-platform-import", { max: 30, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (/^\/api\/admin\/products\/[^/]+\/(publish|unpublish|schedule)$/.test(pathname)) {
+    enforceRouteRateLimit(req, "admin-product-lifecycle", { max: 60, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname === "/api/webhooks/inventory-updated") {
+    enforceRouteRateLimit(req, "inventory-webhook", { max: 120, windowMs: GENERAL_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname === "/api/internal/revalidate") {
+    enforceRouteRateLimit(req, "internal-revalidate", { max: 20, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (
+    pathname.startsWith("/api/admin/products/media") ||
+    pathname.startsWith("/api/admin/import-jobs") ||
+    pathname.includes("/media/recompute")
+  ) {
+    enforceRouteRateLimit(req, "admin-media-import", { max: 30, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
+  }
+
+  if (pathname.startsWith("/api/admin/products/bulk")) {
+    enforceRouteRateLimit(req, "admin-bulk-actions", { max: 40, windowMs: AUTH_RATE_LIMIT_WINDOW_MS });
   }
 }
 
@@ -4747,13 +6012,27 @@ function signToken(user) {
 function verifyToken(token) {
   const [header, payload, signature] = token.split(".");
   if (!header || !payload || !signature) throw new ApiError(401, "invalid_token", "Invalid token");
+  let parsedHeader;
+  try {
+    parsedHeader = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
+  } catch {
+    throw new ApiError(401, "invalid_token", "Invalid token");
+  }
+  if (parsedHeader.alg !== "HS256" || parsedHeader.typ !== "JWT") {
+    throw new ApiError(401, "invalid_token", "Invalid token header");
+  }
   const expected = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${payload}`).digest("base64url");
   const actualBuffer = Buffer.from(signature);
   const expectedBuffer = Buffer.from(expected);
   if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) {
     throw new ApiError(401, "invalid_token", "Invalid token signature");
   }
-  const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    throw new ApiError(401, "invalid_token", "Invalid token");
+  }
   if (parsed.exp && parsed.exp < Math.floor(Date.now() / 1000)) throw new ApiError(401, "token_expired", "Token expired");
   return parsed;
 }
@@ -4769,12 +6048,17 @@ function hashPassword(password) {
 }
 
 function verifyPassword(password, user) {
+  if (user?.passwordLoginDisabled || !user?.passwordHash || !user?.passwordSalt) return false;
   const hash = crypto.scryptSync(password, user.passwordSalt, 64);
   const stored = Buffer.from(user.passwordHash, "hex");
   return stored.length === hash.length && crypto.timingSafeEqual(stored, hash);
 }
 
 async function readJson(req, options = {}) {
+  return (await readJsonRaw(req, options)).body;
+}
+
+async function readJsonRaw(req, options = {}) {
   const maxBytes = options.maxBytes || 2_000_000;
   const chunks = [];
   let size = 0;
@@ -4783,12 +6067,26 @@ async function readJson(req, options = {}) {
     if (size > maxBytes) throw new ApiError(413, "payload_too_large", "Request body is too large");
     chunks.push(chunk);
   }
-  if (!chunks.length) return {};
+  if (!chunks.length) return { body: {}, rawBody: "" };
+  const rawBody = Buffer.concat(chunks).toString("utf8");
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return { body: JSON.parse(rawBody), rawBody };
   } catch {
     throw new ApiError(400, "invalid_json", "Body must be valid JSON");
   }
+}
+
+async function readFormUrlencoded(req, options = {}) {
+  const maxBytes = options.maxBytes || 64_000;
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw new ApiError(413, "payload_too_large", "Request body is too large");
+    chunks.push(chunk);
+  }
+  const rawBody = Buffer.concat(chunks).toString("utf8");
+  return Object.fromEntries(new URLSearchParams(rawBody).entries());
 }
 
 function send(res, status, payload) {
@@ -4806,7 +6104,7 @@ async function sendStaticAsset(res, pathname) {
   const normalizedAssetPath = path.normalize(assetPath);
   const allowedRoot = path.normalize(path.join(SRC_DIR, "assets"));
 
-  if (!normalizedAssetPath.startsWith(allowedRoot)) {
+  if (!normalizedAssetPath.startsWith(`${allowedRoot}${path.sep}`)) {
     throw new ApiError(403, "forbidden", "Asset path is not allowed");
   }
 
@@ -4831,7 +6129,7 @@ async function sendDistAsset(req, res, pathname) {
   const requestedPath = path.normalize(path.join(DIST_DIR, cleanPathname.replace(/^\/+/, "")));
   const distRoot = path.normalize(DIST_DIR);
 
-  if (!requestedPath.startsWith(distRoot)) {
+  if (!requestedPath.startsWith(`${distRoot}${path.sep}`) && requestedPath !== distRoot) {
     throw new ApiError(403, "forbidden", "Static asset path is not allowed");
   }
 
@@ -4911,8 +6209,9 @@ async function importProductFromUrl(rawUrl, options = {}) {
   const sourceUrl = requireString(rawUrl, "url");
   let pageUrl;
   try {
-    pageUrl = new URL(sourceUrl);
-  } catch {
+    pageUrl = await validateExternalHttpUrl(sourceUrl);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(400, "validation_error", "Product URL is invalid");
   }
 
@@ -4931,7 +6230,9 @@ async function importProductFromUrl(rawUrl, options = {}) {
     throw new ApiError(400, "import_failed", `Unable to fetch the product page (${response.status})`);
   }
 
-  const html = await response.text();
+  assertHtmlResponse(response);
+  pageUrl = new URL(response.url || pageUrl.toString());
+  const html = await readResponseTextWithLimit(response, MAX_REMOTE_HTML_BYTES, "Product page");
   const schema = extractProductSchema(html, pageUrl);
   const embeddedProduct = extractEmbeddedProductSignals(html, pageUrl, options.query || "");
   const title =
@@ -4993,9 +6294,21 @@ async function importProductFromUrl(rawUrl, options = {}) {
     features: storefrontFeatures,
     specs,
   });
+  const descriptionBlocks = buildDescriptionBlocksFromImportDraft(
+    {
+      nameEn: normalizedName || cleanName,
+      sourceUrl: pageUrl.toString(),
+      descriptionHtml: html,
+    },
+    {
+      sourceUrl: pageUrl.toString(),
+      sourceType: schema.used ? "official" : "retailer",
+      productName: normalizedName || cleanName,
+    },
+  );
 
   const draft = {
-    sourceUrl,
+    sourceUrl: pageUrl.toString(),
     nameEn: normalizedName || cleanName,
     nameAr: "",
     brand,
@@ -5011,6 +6324,7 @@ async function importProductFromUrl(rawUrl, options = {}) {
     officialPriceUsd: importedOfficialPrice.priceUsd,
     image: finalImages[0] || "",
     gallery: finalImages,
+    descriptionBlocks,
     features: storefrontFeatures,
     specs,
     importMeta: {
@@ -7409,8 +8723,9 @@ function mergeImportedDrafts(base, fallback) {
 async function sendImportedAsset(res, pathname) {
   try {
     const relativePath = pathname.replace(/^\/media\/imports\//, "");
-    const filePath = path.join(IMPORT_MEDIA_DIR, relativePath);
-    if (!filePath.startsWith(IMPORT_MEDIA_DIR)) throw new ApiError(400, "validation_error", "Invalid asset path");
+    const filePath = path.normalize(path.join(IMPORT_MEDIA_DIR, relativePath));
+    const allowedRoot = path.normalize(IMPORT_MEDIA_DIR);
+    if (!filePath.startsWith(`${allowedRoot}${path.sep}`)) throw new ApiError(400, "validation_error", "Invalid asset path");
     const contents = await readFile(filePath);
     res.writeHead(200, { "Content-Type": getMimeType(filePath), "Cache-Control": "public, max-age=31536000, immutable" });
     res.end(contents);
@@ -7488,10 +8803,17 @@ async function persistUploadedProductImage(file, seed, desiredRole = "gallery") 
   const rawData = String(file?.data || "").trim();
   const base64 = rawData.includes(",") ? rawData.split(",").pop() : rawData;
   if (!base64) throw new ApiError(400, "validation_error", "Image data is missing");
+  if (contentType && !ALLOWED_IMAGE_CONTENT_TYPES.has(normalizeContentType(contentType))) {
+    throw new ApiError(400, "invalid_image_type", "Only JPG, PNG, WebP, and AVIF product images are allowed");
+  }
 
   const buffer = Buffer.from(base64, "base64");
   if (!buffer.length || buffer.length > 6_000_000) {
     throw new ApiError(413, "payload_too_large", "Each image must be smaller than 6 MB");
+  }
+  const uploadedMeta = readImageMetaFromBuffer(buffer, filename, contentType);
+  if (!["jpg", "png", "webp", "avif"].includes(uploadedMeta.format) || !uploadedMeta.width || !uploadedMeta.height) {
+    throw new ApiError(400, "invalid_image", "Uploaded file must be a valid JPG, PNG, WebP, or AVIF image");
   }
 
   if (!shouldPersistImportedImage(buffer, filename)) {
@@ -7509,7 +8831,7 @@ async function persistUploadedProductImage(file, seed, desiredRole = "gallery") 
     ? ".png"
     : extensionFromContentType(contentType) || path.extname(filename).toLowerCase() || ".jpg";
   const safeSeed = slugify(seed || "product") || "product";
-  const safeExtension = [".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif", ".svg"].includes(extension)
+  const safeExtension = ALLOWED_IMAGE_EXTENSIONS.has(extension)
     ? extension
     : ".jpg";
   const storedName = `${safeSeed}-${hash}${safeExtension}`;
@@ -7566,12 +8888,17 @@ async function downloadImportedImage(imageUrl, seed, options = {}) {
   );
   if (!response.ok) return "";
 
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  assertImageResponse(response);
+  const resolvedImageUrl = response.url || imageUrl;
+  const buffer = await readResponseBufferWithLimit(response, MAX_REMOTE_IMAGE_BYTES, "Product image");
+  const remoteMeta = readImageMetaFromBuffer(buffer, resolvedImageUrl, response.headers.get("content-type") || "");
+  if (!["jpg", "png", "webp", "avif"].includes(remoteMeta.format) || !remoteMeta.width || !remoteMeta.height) {
+    throw new ApiError(400, "invalid_image", "Remote file is not a valid JPG, PNG, WebP, or AVIF image");
+  }
   if (!shouldPersistImportedImage(buffer, imageUrl)) return "";
   const normalized = normalizeProductImageBufferForStorage(buffer, {
-    sourceName: imageUrl,
-    sourceUrl: imageUrl,
+    sourceName: resolvedImageUrl,
+    sourceUrl: resolvedImageUrl,
     kind: "remote",
   });
   const storedBuffer = normalized.buffer;
@@ -7579,8 +8906,11 @@ async function downloadImportedImage(imageUrl, seed, options = {}) {
   const extension = normalized.changed
     ? ".png"
     : extensionFromContentType(response.headers.get("content-type")) ||
-      path.extname(new URL(imageUrl).pathname).toLowerCase() ||
+      path.extname(new URL(resolvedImageUrl).pathname).toLowerCase() ||
       ".jpg";
+  if (!ALLOWED_IMAGE_EXTENSIONS.has(extension)) {
+    throw new ApiError(400, "invalid_image_type", "Only JPG, PNG, WebP, and AVIF product images are allowed");
+  }
   const safeSeed = slugify(seed || "product") || "product";
   const filename = `${safeSeed}-${hash}${extension}`;
   const filePath = path.join(IMPORT_MEDIA_DIR, filename);
@@ -7590,7 +8920,7 @@ async function downloadImportedImage(imageUrl, seed, options = {}) {
       productId: options.productId || null,
       url: storedUrl,
       storedUrl,
-      sourceUrl: imageUrl,
+      sourceUrl: resolvedImageUrl,
       sourceType: options.sourceType || "retailer",
       role: options.role || "gallery",
       checksum: checksumBuffer(storedBuffer),
@@ -7608,7 +8938,7 @@ async function downloadImportedImage(imageUrl, seed, options = {}) {
     productId: options.productId || null,
     url: storedUrl,
     storedUrl,
-    sourceUrl: imageUrl,
+    sourceUrl: resolvedImageUrl,
     sourceType: options.sourceType || "retailer",
     role: options.role || "gallery",
     checksum: checksumBuffer(storedBuffer),
@@ -8397,7 +9727,7 @@ async function searchDirectDomainCandidates(query, domains) {
       const resolvedUrl = new URL(response.url || candidateUrl);
       if (!isLikelyProductPage(resolvedUrl)) continue;
 
-      const html = await response.text();
+      const html = await readResponseTextWithLimit(response, MAX_REMOTE_HTML_BYTES, "External product page");
       const title =
         extractMetaContent(html, "property", "og:title") ||
         extractMetaContent(html, "name", "twitter:title") ||
@@ -8636,7 +9966,8 @@ async function searchDuckDuckGoCandidates(query, variant) {
     throw new ApiError(400, "import_failed", `Unable to search for this model (${response.status})`);
   }
 
-  const html = await response.text();
+  assertHtmlResponse(response);
+  const html = await readResponseTextWithLimit(response, MAX_REMOTE_HTML_BYTES, "DuckDuckGo search response");
   if (/anomaly-modal|bots use duckduckgo too|confirm this search was made by a human/i.test(html)) {
     throw new ApiError(400, "import_failed", "DuckDuckGo search challenge triggered");
   }
@@ -8681,7 +10012,8 @@ async function searchBingCandidates(query, variant) {
     throw new ApiError(400, "import_failed", `Unable to search Bing for this model (${response.status})`);
   }
 
-  const html = await response.text();
+  assertHtmlResponse(response);
+  const html = await readResponseTextWithLimit(response, MAX_REMOTE_HTML_BYTES, "Bing search response");
   const results = [];
 
   for (const match of html.matchAll(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/gi)) {
@@ -8798,7 +10130,8 @@ async function fetchTextWithBrowserHeaders(url) {
     throw new Error(`Failed to fetch ${url}: ${response.status}`);
   }
 
-  return response.text();
+  assertHtmlResponse(response);
+  return readResponseTextWithLimit(response, MAX_REMOTE_HTML_BYTES, "External text response");
 }
 
 function isLikelyProductPage(url) {
@@ -9583,12 +10916,91 @@ function serializeImportProductMatch(product) {
 }
 
 function setCorsHeaders(req, res) {
-  const origin = req.headers.origin || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
+  const origin = normalizeOrigin(req.headers.origin);
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+}
+
+function setSecurityHeaders(req, res) {
+  const directives = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https:",
+    "connect-src 'self' https:",
+    "form-action 'self'",
+  ];
+  if (process.env.NODE_ENV === "production") directives.push("upgrade-insecure-requests");
+
+  res.setHeader("Content-Security-Policy", directives.join("; "));
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  if (AUTH_COOKIE_SECURE || process.env.NODE_ENV === "production") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  }
+}
+
+function normalizeOrigin(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "";
+  }
+}
+
+function configuredAllowedOrigins() {
+  const values = [
+    process.env.PUBLIC_APP_URL,
+    process.env.VITE_PUBLIC_APP_URL,
+    process.env.EDIO_ALLOWED_ORIGINS,
+    `http://${HOST}:${PORT}`,
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+  ];
+  return new Set(
+    values
+      .flatMap((value) => String(value || "").split(","))
+      .map(normalizeOrigin)
+      .filter(Boolean),
+  );
+}
+
+function isAllowedOrigin(origin) {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+  if (configuredAllowedOrigins().has(normalized)) return true;
+  if (process.env.NODE_ENV !== "production") {
+    return /^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/.test(normalized);
+  }
+  return false;
+}
+
+function assertAllowedRequestOrigin(req, pathname = "") {
+  const method = req.method || "GET";
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return;
+  if (/^\/api\/auth\/oauth\/(?:google|apple)\/callback$/.test(pathname)) return;
+  const origin = normalizeOrigin(req.headers.origin);
+  if (origin && !isAllowedOrigin(origin)) {
+    throw new ApiError(403, "forbidden_origin", "Request origin is not allowed");
+  }
 }
 
 function normalizePathname(pathname) {
@@ -9603,6 +11015,300 @@ function normalizeEmail(value) {
 function requireString(value, field) {
   const normalized = String(value || "").trim();
   if (!normalized) throw new ApiError(400, "validation_error", `${field} is required`);
+  return normalized;
+}
+
+function sanitizePlainText(value, { max = 500 } = {}) {
+  const cleaned = String(value || "")
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\bjavascript\s*:/gi, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, max);
+}
+
+function normalizeDescriptionBlocks(value, { publicOnly = false } = {}) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((block, index) => normalizeDescriptionBlock(block, index, { publicOnly }))
+    .filter(Boolean)
+    .slice(0, 40);
+}
+
+function publicDescriptionBlocks(value) {
+  return normalizeDescriptionBlocks(value, { publicOnly: true });
+}
+
+function normalizeProductPageContent(value, { publicOnly = false } = {}) {
+  if (!value || typeof value !== "object") return undefined;
+  const media = normalizeProductPageMediaList(value.media, { publicOnly });
+  const sources = publicOnly ? [] : normalizeProductPageSources(value.sources);
+  const blocks = Array.isArray(value.description?.blocks)
+    ? value.description.blocks
+        .map((block, index) => normalizeProductPageBlock(block, index, { publicOnly }))
+        .filter(Boolean)
+        .slice(0, 24)
+    : [];
+  const groups = Array.isArray(value.specs?.groups)
+    ? value.specs.groups
+        .map((group, index) => normalizeProductPageSpecGroup(group, index))
+        .filter(Boolean)
+        .slice(0, 12)
+    : [];
+  const videos = Array.isArray(value.videos)
+    ? value.videos
+        .map((video, index) => ({
+          id: sanitizePlainText(video.id || `video_${index}`, { max: 80 }),
+          title: sanitizePlainText(video.title, { max: 140 }),
+          url: sanitizeImageUrl(video.url),
+          thumbnail: sanitizeImageUrl(video.thumbnail),
+          ...(publicOnly ? {} : { sourceUrl: sanitizeImageUrl(video.sourceUrl) }),
+        }))
+        .filter((video) => video.title && video.url)
+        .slice(0, 8)
+    : [];
+
+  return {
+    description: { blocks },
+    sound: normalizeProductPageSound(value.sound, { publicOnly }),
+    specs: { groups },
+    media,
+    videos,
+    sources,
+    seo: value.seo && typeof value.seo === "object"
+      ? {
+          title: sanitizePlainText(value.seo.title, { max: 70 }),
+          metaDescription: sanitizePlainText(value.seo.metaDescription || value.seo.meta_description, { max: 170 }),
+          keywords: cleanStringArray(value.seo.keywords, 20, 60),
+          canonicalPath: sanitizePath(value.seo.canonicalPath || value.seo.canonical_path),
+          ogImage: sanitizeImageUrl(value.seo.ogImage || value.seo.og_image),
+        }
+      : undefined,
+    seoWarnings: cleanStringArray(value.seoWarnings || value.seo_warnings, 20, 120),
+    contentStatus: normalizeEnum(value.contentStatus || value.content_status, new Set(["draft", "needs_research", "reviewed", "published"]), "draft", "contentStatus"),
+    updatedAt: sanitizePlainText(value.updatedAt || value.updated_at, { max: 40 }),
+  };
+}
+
+function publicProductPageContent(value) {
+  return normalizeProductPageContent(value, { publicOnly: true });
+}
+
+function normalizeProductPageBlock(block, index, { publicOnly = false } = {}) {
+  if (!block || typeof block !== "object") return null;
+  const media = normalizeProductPageMedia(block.media, index, { publicOnly });
+  const video = block.video && typeof block.video === "object"
+    ? {
+        id: sanitizePlainText(block.video.id || `video_${index}`, { max: 80 }),
+        title: sanitizePlainText(block.video.title, { max: 140 }),
+        url: sanitizeImageUrl(block.video.url),
+        thumbnail: sanitizeImageUrl(block.video.thumbnail),
+        ...(publicOnly ? {} : { sourceUrl: sanitizeImageUrl(block.video.sourceUrl) }),
+      }
+    : undefined;
+  return {
+    id: sanitizePlainText(block.id || `block_${index}`, { max: 80 }),
+    type: normalizeEnum(block.type, new Set(["hero_editorial", "brand_story", "feature", "image_text", "full_width_image", "video_embed", "press_quote", "faq"]), "feature", "blockType"),
+    title: sanitizePlainText(block.title, { max: 180 }),
+    subtitle: sanitizePlainText(block.subtitle, { max: 220 }),
+    body: sanitizePlainText(block.body, { max: 5000 }),
+    media,
+    video: video?.title && video?.url ? video : undefined,
+    layout: normalizeEnum(block.layout, new Set(["image-left", "image-right", "full-width", "two-column"]), "image-right", "blockLayout"),
+    order: Number.isFinite(Number(block.order)) ? Number(block.order) : index,
+    visible: block.visible !== false,
+    ...(publicOnly ? {} : { sourceRefIds: cleanStringArray(block.sourceRefIds || block.source_ref_ids, 12, 80) }),
+  };
+}
+
+function normalizeProductPageSound(sound, { publicOnly = false } = {}) {
+  if (!sound || typeof sound !== "object") return undefined;
+  return {
+    signature: sanitizePlainText(sound.signature, { max: 160 }),
+    bass: sanitizePlainText(sound.bass, { max: 600 }),
+    mids: sanitizePlainText(sound.mids, { max: 600 }),
+    treble: sanitizePlainText(sound.treble, { max: 600 }),
+    soundstage: sanitizePlainText(sound.soundstage, { max: 600 }),
+    imaging: sanitizePlainText(sound.imaging, { max: 600 }),
+    detail: sanitizePlainText(sound.detail, { max: 600 }),
+    comfort: sanitizePlainText(sound.comfort, { max: 600 }),
+    pairing: sanitizePlainText(sound.pairing, { max: 600 }),
+    genreMatch: cleanStringArray(sound.genreMatch || sound.genre_match, 12, 60),
+    dacAmpRequirement: sanitizePlainText(sound.dacAmpRequirement || sound.dac_amp_requirement, { max: 400 }),
+    graphImage: normalizeProductPageMedia(sound.graphImage || sound.graph_image, 0, { publicOnly }),
+    ...(publicOnly ? {} : {
+      sourceRefs: normalizeProductPageSources(sound.sourceRefs || sound.source_refs),
+      sourceConfidence: normalizeEnum(sound.sourceConfidence || sound.source_confidence, new Set(["high", "medium", "low"]), "low", "sourceConfidence"),
+    }),
+  };
+}
+
+function normalizeProductPageSpecGroup(group, index) {
+  if (!group || typeof group !== "object") return null;
+  const specs = Array.isArray(group.specs)
+    ? group.specs
+        .map((spec) => ({
+          name: sanitizePlainText(spec.name, { max: 120 }),
+          value: sanitizePlainText(spec.value, { max: 240 }),
+          unit: sanitizePlainText(spec.unit, { max: 40 }),
+          sourceRefId: sanitizePlainText(spec.sourceRefId || spec.source_ref_id, { max: 80 }),
+        }))
+        .filter((spec) => spec.name && spec.value)
+        .slice(0, 40)
+    : [];
+  return {
+    id: sanitizePlainText(group.id || `spec_group_${index}`, { max: 80 }),
+    title: sanitizePlainText(group.title || "Specs", { max: 80 }),
+    specs,
+    order: Number.isFinite(Number(group.order)) ? Number(group.order) : index,
+  };
+}
+
+function normalizeProductPageMediaList(value, { publicOnly = false } = {}) {
+  if (!Array.isArray(value)) return [];
+  return value.map((media, index) => normalizeProductPageMedia(media, index, { publicOnly })).filter(Boolean).slice(0, 40);
+}
+
+function normalizeProductPageMedia(media, index, { publicOnly = false } = {}) {
+  if (!media || typeof media !== "object") return undefined;
+  const url = sanitizeImageUrl(media.url);
+  if (!url) return undefined;
+  return {
+    id: sanitizePlainText(media.id || `media_${index}`, { max: 80 }),
+    url,
+    alt: sanitizePlainText(media.alt, { max: 180 }),
+    caption: sanitizePlainText(media.caption, { max: 240 }),
+    width: positiveInteger(media.width),
+    height: positiveInteger(media.height),
+    ...(publicOnly ? {} : { sourceUrl: sanitizeImageUrl(media.sourceUrl || media.source_url) }),
+    licenseStatus: normalizeEnum(media.licenseStatus || media.license_status, new Set(["official_manufacturer", "owned", "licensed", "authorized_distributor", "unknown", "do_not_use"]), "unknown", "licenseStatus"),
+    placement: normalizeEnum(media.placement, new Set(["gallery", "description", "sound", "specs"]), "description", "placement"),
+    order: Number.isFinite(Number(media.order)) ? Number(media.order) : index,
+    isPrimary: Boolean(media.isPrimary || media.is_primary),
+  };
+}
+
+function normalizeProductPageSources(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((source, index) => {
+      const url = sanitizeImageUrl(source.url);
+      if (!url) return null;
+      return {
+        id: sanitizePlainText(source.id || `source_${index}`, { max: 80 }),
+        title: sanitizePlainText(source.title, { max: 180 }),
+        url,
+        sourceType: normalizeEnum(source.sourceType || source.source_type, new Set(["manufacturer", "official_manual", "authorized_distributor", "expert_review", "forum_user_review", "internal"]), "internal", "sourceType"),
+        confidence: normalizeEnum(source.confidence, new Set(["high", "medium", "low"]), "low", "confidence"),
+        usedFields: cleanStringArray(source.usedFields || source.used_fields, 8, 40).filter((field) => ["specs", "sound", "description", "images"].includes(field)),
+        notes: sanitizePlainText(source.notes, { max: 500 }),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 40);
+}
+
+function sanitizePath(value) {
+  const normalized = sanitizePlainText(value, { max: 240 });
+  return normalized.startsWith("/") && !normalized.startsWith("//") ? normalized : "";
+}
+
+function normalizeDescriptionBlock(block, index, { publicOnly = false } = {}) {
+  if (!block || typeof block !== "object") return null;
+  const rawType = String(block.type || "").trim();
+  const type = ["text", "image", "spec_image", "image_group", "callout"].includes(rawType) ? rawType : "image";
+  const mediaUrl = sanitizeImageUrl(block.media?.url || block.url || "");
+  const contentText = sanitizeDescriptionText(
+    block.content?.text || block.content?.markdown || block.content?.html_or_markdown || block.text || "",
+    { max: 5000 },
+  ).replace(/<img\b[^>]*>/gi, "");
+  const normalized = {
+    id: sanitizePlainText(block.id || `desc_${index}`, { max: 80 }),
+    type,
+    section: normalizeEnum(block.section || block.content?.section || "", new Set(["description", "description_media", "technical_specs", "box_contents"]), "", "descriptionSection") || undefined,
+    content: contentText ? { text: sanitizePlainText(contentText, { max: 5000 }) } : block.content?.imageRole ? { imageRole: block.content.imageRole } : {},
+    media: mediaUrl
+      ? {
+          url: mediaUrl,
+          alt: sanitizePlainText(block.altText || block.alt_text || block.media?.alt || "", { max: 180 }),
+          width: positiveInteger(block.media?.width),
+          height: positiveInteger(block.media?.height),
+          role: normalizeDescriptionRole(block.media?.role || block.content?.imageRole || block.role),
+        }
+      : undefined,
+    sortOrder: Number.isFinite(Number(block.sortOrder ?? block.sort_order)) ? Number(block.sortOrder ?? block.sort_order) : index,
+    altText: sanitizePlainText(block.altText || block.alt_text || block.media?.alt || "", { max: 180 }),
+    caption: sanitizePlainText(block.caption || "", { max: 240 }),
+    extractedText: sanitizePlainText(block.extractedText || block.extracted_text || "", { max: 2500 }),
+    extractionConfidence: optionalConfidence(block.extractionConfidence ?? block.extraction_confidence) || 0,
+    needsReview: Boolean(block.needsReview ?? block.needs_review),
+  };
+
+  if (!normalized.content?.text && !normalized.media?.url) return null;
+
+  if (!publicOnly) {
+    normalized.sourceUrl = sanitizePlainText(block.sourceUrl || block.source_url || "", { max: 1000 });
+    normalized.sourceType = normalizeEnum(block.sourceType || block.source_type || "manual", new Set(["official", "retailer", "imported", "manual", "unknown"]), "unknown", "sourceType");
+    normalized.classificationReason = sanitizePlainText(block.classificationReason || block.classification_reason || "", { max: 240 });
+    normalized.confidence = optionalConfidence(block.confidence) || 0;
+  }
+
+  return normalized;
+}
+
+function sanitizeImageUrl(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  if (normalized.startsWith("/") && !normalized.startsWith("//")) return sanitizePlainText(normalized, { max: 1000 });
+  if (/^https?:\/\//i.test(normalized)) return sanitizePlainText(normalized, { max: 1000 });
+  if (/^data:image\/(?:png|jpe?g|webp|avif);base64,/i.test(normalized)) return normalized.slice(0, 150000);
+  return "";
+}
+
+function normalizeDescriptionRole(value) {
+  const role = String(value || "description").trim().toLowerCase().replace(/-/g, "_");
+  if (["description", "feature", "spec_image", "box_image", "unknown_description_image", "comparison", "diagram", "unknown"].includes(role)) return role;
+  if (["spec", "technical", "chart"].includes(role)) return "spec_image";
+  if (["box", "package", "package_contents", "contents", "included"].includes(role)) return "box_image";
+  return "description";
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined;
+}
+
+function requireCleanString(value, field, max = 500) {
+  const normalized = sanitizePlainText(value, { max });
+  if (!normalized) throw new ApiError(400, "validation_error", `${field} is required`);
+  return normalized;
+}
+
+function assertNoForbiddenFields(body, fields = FORBIDDEN_PROFILE_FIELDS) {
+  if (!body || typeof body !== "object") return;
+  const blocked = Object.keys(body).find((key) => fields.has(key));
+  if (blocked) {
+    throw new ApiError(400, "forbidden_field", `${blocked} cannot be changed from this endpoint`);
+  }
+}
+
+function cleanStringArray(value, maxItems = 20, maxLength = 120) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => sanitizePlainText(item, { max: maxLength }))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function normalizeEnum(value, allowed, fallback, field) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return fallback;
+  if (!allowed.has(normalized)) {
+    throw new ApiError(400, "validation_error", `${field} is not allowed`);
+  }
   return normalized;
 }
 
@@ -9648,9 +11354,21 @@ class ApiError extends Error {
   }
 }
 
+function validateProductionSecurityConfig() {
+  if (process.env.NODE_ENV !== "production") return;
+  if (!process.env.JWT_SECRET || JWT_SECRET === DEFAULT_JWT_SECRET || JWT_SECRET.length < 32) {
+    throw new Error("Production requires a strong JWT_SECRET of at least 32 characters.");
+  }
+  if (!AUTH_COOKIE_SECURE) {
+    throw new Error("Production requires secure authentication cookies.");
+  }
+}
+
+validateProductionSecurityConfig();
 db = await loadDatabase();
 
 const server = http.createServer(async (req, res) => {
+  setSecurityHeaders(req, res);
   setCorsHeaders(req, res);
 
   if (req.method === "OPTIONS") {
